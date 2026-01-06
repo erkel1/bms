@@ -2259,17 +2259,14 @@ def draw_tui(stdscr, voltages, calibrated_temps, raw_temps, offsets, bank_stats,
                 logging.warning(f"Skipping summary line {idx+1} for Bank {bank_id+1} - out of bounds.")
     # Next offset.
     y_offset += art_height + 2
-    # Full temps per bank - ULTRA-COMPACT table format for ~30 line screens
-    # With 192 cells (8 bat × 3 bank × 8 sens), we show summary + alerts only
+    # Full temps per bank - TABLE format for ~30 line screens
+    # Structure: 8 batteries × 3 banks × 8 cells = 192 cells total
+    # Display: Each row shows all 8 cell temps for one battery across all 3 banks
     number_parallel = settings['number_of_parallel_batteries']
-    sensors_per_battery = settings['sensors_per_battery']
-    sensors_per_bank = settings['sensors_per_bank']
+    sensors_per_bank = settings['sensors_per_bank']  # 8 cells per bank per battery
     
-    # Header with column labels
-    header = "BAT    "
-    for bank_id in range(NUM_BANKS):
-        summary = bank_stats[bank_id]
-        header += f"B{bank_id+1}:{summary['median']:>4.0f} "
+    # Table header
+    header = "Bat\Bank  " + "   Bank 1    " + "   Bank 2    " + "   Bank 3    "
     if y_offset < height and len(header) < right_half_x:
         try:
             stdscr.addstr(y_offset, 0, header, curses.color_pair(7) | curses.A_BOLD)
@@ -2286,57 +2283,42 @@ def draw_tui(stdscr, voltages, calibrated_temps, raw_temps, offsets, bank_stats,
             pass
     y_offset += 1
     
-    # Find batteries with issues
-    alert_batteries = []
-    normal_batteries = []
-    
+    # Show each battery as a row with 8 cell temps per bank
     for bat_id in range(1, number_parallel + 1):
-        has_issue = False
-        for bank_id in range(NUM_BANKS):
-            for sensor_pos in range(sensors_per_bank):
-                global_idx = (bank_id * sensors_per_bank) + ((bat_id - 1) * sensors_per_battery) + sensor_pos
-                if global_idx < len(calibrated_temps):
-                    calib = calibrated_temps[global_idx]
-                    if calib is not None and (calib > settings['high_threshold'] or calib < settings['low_threshold']):
-                        has_issue = True
-                        break
-            if has_issue:
-                break
-        if has_issue:
-            alert_batteries.append(bat_id)
-        else:
-            normal_batteries.append(bat_id)
-    
-    # Show batteries with issues first (up to 10 lines)
-    for bat_id in alert_batteries:
-        if y_offset >= height - 2:  # Reserve 2 lines for normal summary
+        if y_offset >= height - 2:
             break
         
-        row = f"B{bat_id}: "
-        cell_values = []
+        row = f"Battery {bat_id}  "
+        
         for bank_id in range(NUM_BANKS):
-            # Get all sensor values for this battery in this bank
-            vals = []
+            # Get 8 cell temps for this battery in this bank
+            cell_temps = []
             for sensor_pos in range(sensors_per_bank):
-                global_idx = (bank_id * sensors_per_bank) + ((bat_id - 1) * sensors_per_battery) + sensor_pos
-                if global_idx < len(calibrated_temps) and calibrated_temps[global_idx] is not None:
-                    vals.append(calibrated_temps[global_idx])
-            
-            if vals:
-                med = sum(vals) / len(vals)
-                mn = min(vals)
-                mx = max(vals)
-                # Show with alert indicators
-                if any(v > settings['high_threshold'] or v < settings['low_threshold'] for v in vals):
-                    cell_values.append(f"!{mn:.0f}/{med:.0f}/{mx:.0f}!")
+                global_idx = (bank_id * sensors_per_bank) + ((bat_id - 1) * sensors_per_bank) + sensor_pos
+                if global_idx < len(calibrated_temps):
+                    calib = calibrated_temps[global_idx]
+                    if calib is not None:
+                        # Format: H for high alert, L for low, . for normal
+                        if calib > settings['high_threshold']:
+                            cell_temps.append("H")
+                        elif calib < settings['low_threshold']:
+                            cell_temps.append("L")
+                        else:
+                            cell_temps.append(".")
+                    else:
+                        cell_temps.append("?")
                 else:
-                    cell_values.append(f" {mn:.0f}/{med:.0f}/{mx:.0f} ")
-            else:
-                cell_values.append("  ---  ")
+                    cell_temps.append("-")
+            
+            # Show as compact string: 8 chars for 8 cells
+            bank_str = "[" + "".join(cell_temps) + "]"
+            row += bank_str + " "
         
-        row += " | ".join(cell_values)
+        # Determine row color
+        row_color = curses.color_pair(4)  # Default green
+        if "H" in row or "L" in row:
+            row_color = curses.color_pair(2)  # Red for alerts
         
-        row_color = curses.color_pair(2)  # Red for issues
         if len(row) < right_half_x:
             try:
                 stdscr.addstr(y_offset, 0, row, row_color)
@@ -2344,17 +2326,17 @@ def draw_tui(stdscr, voltages, calibrated_temps, raw_temps, offsets, bank_stats,
                 pass
         y_offset += 1
     
-    # Show count of normal batteries
+    # Legend at bottom
     if y_offset < height:
-        if normal_batteries:
-            row = f"OK: Batteries {normal_batteries[0]}-{normal_batteries[-1]} ({len(normal_batteries)} bats normal)"
+        legend = "Legend: [........] = normal temps, [H...] = high alert, [L...] = low alert, [?] = invalid, [-] = missing"
+        if len(legend) < right_half_x:
             try:
-                stdscr.addstr(y_offset, 0, row, curses.color_pair(4))
+                stdscr.addstr(y_offset, 0, legend, curses.color_pair(3))
             except curses.error:
                 pass
         y_offset += 1
     
-    # Total valid count
+    # Valid count
     if y_offset < height:
         valid_count = len([t for t in calibrated_temps if t is not None])
         total_count = len(calibrated_temps)
@@ -2364,6 +2346,7 @@ def draw_tui(stdscr, voltages, calibrated_temps, raw_temps, offsets, bank_stats,
                 stdscr.addstr(y_offset, 0, row, curses.color_pair(7))
             except curses.error:
                 pass
+    # Startup median.
     # Startup median.
     # Startup median.
     med_str = f"{startup_median:.1f}°C" if startup_median else "N/A"

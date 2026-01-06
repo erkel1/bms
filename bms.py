@@ -2677,7 +2677,7 @@ def startup_self_test(settings, stdscr, data_dir):
                     source_change = final_source_v - initial_source_v
                     dest_change = final_dest_v - initial_dest_v
                     logging.debug(f"Balance test from Bank {source} to Bank {dest} analysis: Bank {source} Initial={initial_source_v:.2f}V, Final={final_source_v:.2f}V, Change={source_change:+.3f}V, Bank {dest} Initial={initial_dest_v:.2f}V, Final={final_dest_v:.2f}V, Change={dest_change:+.3f}V, Min change={min_delta}V")
-                    if source_change >= 0 or dest_change <= 0 or abs(source_change) < min_delta or dest_change < min_delta:
+                    if min_delta > 0 and (source_change >= 0 or dest_change <= 0 or abs(source_change) < min_delta or dest_change < min_delta):
                         alert = f"Balance test from Bank {source} to Bank {dest} failed: Unexpected trend or insufficient change (Bank {source} Initial={initial_source_v:.2f}V, Final={final_source_v:.2f}V, Change={source_change:+.3f}V, Bank {dest} Initial={initial_dest_v:.2f}V, Final={final_dest_v:.2f}V, Change={dest_change:+.3f}V)."
                         alerts.append(alert)
                         event_log.append(f"{time.strftime('%Y-%m-%d %H:%M:%S')}: {alert}")

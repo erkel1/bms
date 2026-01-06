@@ -3165,8 +3165,14 @@ def main(stdscr):
         # Temps alerts.
         temps_alerts = [] # List to collect any temperature problems we find
         all_raw_temps = [] # Will hold all raw temperature readings from all sensors
-        # Read temps per slave.
-        for addr in slave_addresses:
+        # Read temps per slave with delay between each slave for reliable RS485 communication.
+        for i, addr in enumerate(slave_addresses):
+            # Add delay between slaves (except before first slave)
+            if i > 0:
+                inter_delay = settings.get('inter_slave_delay', 0.5)
+                logging.debug(f"Inter-slave delay: {inter_delay}s before slave {addr}")
+                time.sleep(inter_delay)
+            
             temp_result = read_ntc_sensors(
                 settings['ip'], settings['modbus_port'], settings['query_delay'],
                 sensors_per_battery, settings['scaling_factor'],

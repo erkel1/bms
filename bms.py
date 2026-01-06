@@ -2259,44 +2259,112 @@ def draw_tui(stdscr, voltages, calibrated_temps, raw_temps, offsets, bank_stats,
                 logging.warning(f"Skipping summary line {idx+1} for Bank {bank_id+1} - out of bounds.")
     # Next offset.
     y_offset += art_height + 2
-    # Full temps per bank.
+    # Full temps per bank - ULTRA-COMPACT table format for ~30 line screens
+    # With 192 cells (8 bat × 3 bank × 8 sens), we show summary + alerts only
+    number_parallel = settings['number_of_parallel_batteries']
+    sensors_per_battery = settings['sensors_per_battery']
+    sensors_per_bank = settings['sensors_per_bank']
+    
+    # Header with column labels
+    header = "BAT    "
     for bank_id in range(NUM_BANKS):
-        if y_offset < height:
+        summary = bank_stats[bank_id]
+        header += f"B{bank_id+1}:{summary['median']:>4.0f} "
+    if y_offset < height and len(header) < right_half_x:
+        try:
+            stdscr.addstr(y_offset, 0, header, curses.color_pair(7) | curses.A_BOLD)
+        except curses.error:
+            pass
+    y_offset += 1
+    
+    # Separator
+    sep = "-" * len(header)
+    if y_offset < height and len(sep) < right_half_x:
+        try:
+            stdscr.addstr(y_offset, 0, sep, curses.color_pair(7))
+        except curses.error:
+            pass
+    y_offset += 1
+    
+    # Find batteries with issues
+    alert_batteries = []
+    normal_batteries = []
+    
+    for bat_id in range(1, number_parallel + 1):
+        has_issue = False
+        for bank_id in range(NUM_BANKS):
+            for sensor_pos in range(sensors_per_bank):
+                global_idx = (bank_id * sensors_per_bank) + ((bat_id - 1) * sensors_per_battery) + sensor_pos
+                if global_idx < len(calibrated_temps):
+                    calib = calibrated_temps[global_idx]
+                    if calib is not None and (calib > settings['high_threshold'] or calib < settings['low_threshold']):
+                        has_issue = True
+                        break
+            if has_issue:
+                break
+        if has_issue:
+            alert_batteries.append(bat_id)
+        else:
+            normal_batteries.append(bat_id)
+    
+    # Show batteries with issues first (up to 10 lines)
+    for bat_id in alert_batteries:
+        if y_offset >= height - 2:  # Reserve 2 lines for normal summary
+            break
+        
+        row = f"B{bat_id}: "
+        cell_values = []
+        for bank_id in range(NUM_BANKS):
+            # Get all sensor values for this battery in this bank
+            vals = []
+            for sensor_pos in range(sensors_per_bank):
+                global_idx = (bank_id * sensors_per_bank) + ((bat_id - 1) * sensors_per_battery) + sensor_pos
+                if global_idx < len(calibrated_temps) and calibrated_temps[global_idx] is not None:
+                    vals.append(calibrated_temps[global_idx])
+            
+            if vals:
+                med = sum(vals) / len(vals)
+                mn = min(vals)
+                mx = max(vals)
+                # Show with alert indicators
+                if any(v > settings['high_threshold'] or v < settings['low_threshold'] for v in vals):
+                    cell_values.append(f"!{mn:.0f}/{med:.0f}/{mx:.0f}!")
+                else:
+                    cell_values.append(f" {mn:.0f}/{med:.0f}/{mx:.0f} ")
+            else:
+                cell_values.append("  ---  ")
+        
+        row += " | ".join(cell_values)
+        
+        row_color = curses.color_pair(2)  # Red for issues
+        if len(row) < right_half_x:
             try:
-                stdscr.addstr(y_offset, 0, f"Bank {bank_id+1} Temps:", curses.color_pair(7))
+                stdscr.addstr(y_offset, 0, row, row_color)
             except curses.error:
-                logging.warning(f"addstr error for bank {bank_id+1} temps header.")
+                pass
         y_offset += 1
-        bank_indices = BANK_SENSOR_INDICES[bank_id]
-        for i in bank_indices:
-            ch = i + 1
-            bat_id, local_ch = get_battery_and_local_ch(ch)
-            calib = calibrated_temps[i]
-            calib_str = f"{calib:.1f}" if calib is not None else "Inv"
-            # Extra detail on startup.
-            if is_startup:
-                raw = raw_temps[i]
-                raw_str = f"{raw:.1f}" if raw > settings['valid_min'] else "Inv"
-                offset_str = f"{offsets[i]:.1f}" if startup_set and raw > settings['valid_min'] else "N/A"
-                detail = f" ({raw_str}/{offset_str})"
-            else:
-                detail = ""
-            # Compact display format - show all sensors
-            # Format: BatX-CY: VAL
-            t_str = f"B{bat_id}-C{local_ch}:{calib_str}{detail}"
-            # Color.
-            t_color = curses.color_pair(8) if "Inv" in calib_str else \
-                     curses.color_pair(2) if calib is not None and calib > settings['high_threshold'] else \
-                     curses.color_pair(3) if calib is not None and calib < settings['low_threshold'] else \
-                     curses.color_pair(4)
-            if y_offset < height and len(t_str) < right_half_x:
-                try:
-                    stdscr.addstr(y_offset, 0, t_str, t_color)
-                except curses.error:
-                    logging.warning(f"addstr error for temp Bank {bank_id+1} Bat {bat_id} Local C{local_ch}.")
-            else:
-                logging.warning(f"Skipping temp for Bank {bank_id+1} Bat {bat_id} Local C{local_ch} - out of bounds.")
-            y_offset += 1
+    
+    # Show count of normal batteries
+    if y_offset < height:
+        if normal_batteries:
+            row = f"OK: Batteries {normal_batteries[0]}-{normal_batteries[-1]} ({len(normal_batteries)} bats normal)"
+            try:
+                stdscr.addstr(y_offset, 0, row, curses.color_pair(4))
+            except curses.error:
+                pass
+        y_offset += 1
+    
+    # Total valid count
+    if y_offset < height:
+        valid_count = len([t for t in calibrated_temps if t is not None])
+        total_count = len(calibrated_temps)
+        row = f"Valid: {valid_count}/{total_count} ({valid_count*100//total_count}%) | Updated: {time.strftime('%H:%M:%S')}"
+        if len(row) < right_half_x:
+            try:
+                stdscr.addstr(y_offset, 0, row, curses.color_pair(7))
+            except curses.error:
+                pass
+    # Startup median.
     # Startup median.
     med_str = f"{startup_median:.1f}°C" if startup_median else "N/A"
     if y_offset < height:

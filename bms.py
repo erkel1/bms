@@ -275,7 +275,100 @@ balance_start_time = None # Tracks when balancing started - balance clock start.
 last_balance_time = 0 # Tracks when the last balancing ended - balance clock end.
 battery_voltages = [] # Stores current voltages for each bank - voltage list.
 previous_temps = None # Stores previous temperature readings - old temps.
+# Enhanced error handling for temperature readings
+last_good_temps = {}  # Cache of last known good values per slave:channel
+consecutive_failures = {}  # Track consecutive failures per slave:channel
+CONSECUTIVE_FAILURE_THRESHOLD = 5  # Only report error after 5 consecutive failures
+REASONABLE_TEMP_MIN = -10.0  # Minimum reasonable temperature in C
+REASONABLE_TEMP_MAX = 60.0  # Maximum reasonable temperature in C
+
 previous_bank_medians = None # Stores previous median temperatures per bank - old medians.
+# ---------------------------------------------------------------------------
+# Modbus Error Classification for better error handling
+# ---------------------------------------------------------------------------
+class ModbusError(Exception):
+    """Enum-like class for Modbus error types."""
+    TIMEOUT = "timeout"
+    CRC_MISMATCH = "crc_mismatch"
+    SHORT_RESPONSE = "short_response"
+    CONNECTION_REFUSED = "connection_refused"
+    SLAVE_NOT_RESPONDING = "slave_not_responding"
+    ILLEGAL_FUNCTION = "illegal_function"
+    UNKNOWN = "unknown"
+
+# ---------------------------------------------------------------------------
+# Communication Statistics Tracking (Global)
+# ---------------------------------------------------------------------------
+comm_stats = {
+    'slave_addresses': [],
+    'stats': {}
+}
+
+def init_comm_stats(slave_addresses):
+    """Initialize communication statistics for all slaves."""
+    global comm_stats
+    comm_stats['slave_addresses'] = slave_addresses
+    for addr in slave_addresses:
+        comm_stats['stats'][addr] = {
+            'success_count': 0,
+            'fail_count': 0,
+            'last_success': None,
+            'last_error': None,
+            'last_error_type': None,
+            'avg_response_time': 0.0,
+            'response_times': []
+        }
+
+def update_comm_stats(slave_addr, success, error_type=None, response_time=None):
+    """Update communication statistics for a slave."""
+    if slave_addr not in comm_stats['stats']:
+        comm_stats['stats'][slave_addr] = {
+            'success_count': 0,
+            'fail_count': 0,
+            'last_success': None,
+            'last_error': None,
+            'last_error_type': None,
+            'avg_response_time': 0.0,
+            'response_times': []
+        }
+    
+    stats = comm_stats['stats'][slave_addr]
+    if success:
+        stats['success_count'] += 1
+        stats['last_success'] = time.time()
+        stats['last_error'] = None
+        stats['last_error_type'] = None
+        if response_time is not None:
+            stats['response_times'].append(response_time)
+            if len(stats['response_times']) > 100:
+                stats['response_times'].pop(0)
+            stats['avg_response_time'] = sum(stats['response_times']) / len(stats['response_times'])
+    else:
+        stats['fail_count'] += 1
+        stats['last_error'] = time.time()
+        stats['last_error_type'] = error_type
+
+def get_comm_stats():
+    """Get communication statistics summary."""
+    result = {'slaves': [], 'total_success': 0, 'total_fail': 0}
+    for addr in comm_stats.get('slave_addresses', []):
+        stats = comm_stats['stats'].get(addr, {'success_count': 0, 'fail_count': 0, 'last_success': None, 'last_error': None, 'last_error_type': None, 'avg_response_time': 0.0})
+        total = stats['success_count'] + stats['fail_count']
+        success_rate = (stats['success_count'] / total * 100) if total > 0 else 0.0
+        result['slaves'].append({
+            'slave_addr': addr,
+            'success_count': stats['success_count'],
+            'fail_count': stats['fail_count'],
+            'success_rate': round(success_rate, 1),
+            'last_success': stats['last_success'],
+            'last_error': stats['last_error'],
+            'last_error_type': stats['last_error_type'],
+            'avg_response_time': round(stats['avg_response_time'], 3)
+        })
+        result['total_success'] += stats['success_count']
+        result['total_fail'] += stats['fail_count']
+    return result
+
 run_count = 0 # Counts how many times the main loop has run - cycle counter.
 startup_offsets = None # Temperature calibration offsets from startup - adjustment numbers.
 startup_median = None # Median temperature at startup - average at start.
@@ -467,7 +560,7 @@ def test_modbus_connectivity(ip, port):
     except socket.error:
         return False
 
-def read_ntc_sensors(ip, modbus_port, query_delay, num_channels, scaling_factor, max_retries, retry_backoff_base, slave_addr=1):
+def read_ntc_sensors(ip, modbus_port, query_delay, num_channels, scaling_factor, max_retries, retry_backoff_base, slave_addr=1, slave_ports=None, slave_addresses=None):
     """
     Read temperature measurements from NTC thermistor sensors.
     Improved for 9600 baud half-duplex Modbus communication.
@@ -476,21 +569,34 @@ def read_ntc_sensors(ip, modbus_port, query_delay, num_channels, scaling_factor,
     - Increased query_delay to allow device processing time at slow baud rate
     - Progressive receive timeout to detect end of response frame
     - Response validation with length and CRC checks
-    - Better error handling and retry logic
+    - Better error handling with fallback to cached values
+    
+    Enhanced error handling features:
+    - Uses last known good value when errors occur (if within reasonable range)
+    - Only reports error after 5 consecutive failures per channel
+    - Tracks consecutive failures for each sensor channel
     
     Args:
         ip (str): The IP address of the Modbus device.
-        modbus_port (int): The Modbus TCP port.
+        modbus_port (int): The Modbus TCP port (default, overridden by slave_ports if provided).
         query_delay (float): Delay after sending query (in seconds).
         num_channels (int): Number of temperature sensors to read.
         scaling_factor (float): Factor to convert raw to Celsius.
         max_retries (int): Number of retry attempts on failure.
         retry_backoff_base (int): Base for exponential backoff.
         slave_addr (int): Modbus slave address (default 1).
+        slave_ports (list): List of per-slave ports (optional).
+        slave_addresses (list): List of slave addresses for port mapping (optional).
     
     Returns:
         list or str: List of temperatures or error message string.
     """
+    # Handle per-slave port selection
+    if slave_ports and slave_addresses:
+        effective_port = get_port_for_slave(slave_addr, slave_addresses, slave_ports, modbus_port)
+    else:
+        effective_port = modbus_port
+    
     # Log start of read.
     logging.info(f"Starting temp read for slave {slave_addr}.")
     
@@ -515,7 +621,7 @@ def read_ntc_sensors(ip, modbus_port, query_delay, num_channels, scaling_factor,
             s.settimeout(5)  # 5 second timeout for slow devices
             
             # Connect
-            s.connect((ip, modbus_port))
+            s.connect((ip, effective_port))
             
             # Send query
             s.send(query)
@@ -569,6 +675,7 @@ def read_ntc_sensors(ip, modbus_port, query_delay, num_channels, scaling_factor,
             
             if func != 3:
                 if func & 0x80:
+                    update_comm_stats(slave_addr, False, error_type=ModbusError.ILLEGAL_FUNCTION)
                     return f"Error: Modbus exception code {response[2]} for slave {slave_addr}"
                 logging.warning(f"Invalid function code for slave {slave_addr}: {func}")
                 raise ValueError("Invalid function code")
@@ -585,6 +692,7 @@ def read_ntc_sensors(ip, modbus_port, query_delay, num_channels, scaling_factor,
                 raw_temperatures.append(val)
             
             logging.info(f"Temp read successful for slave {slave_addr}: {len(raw_temperatures)} values")
+            update_comm_stats(slave_addr, True)
             return raw_temperatures
             
         except socket.error as e:
@@ -594,17 +702,20 @@ def read_ntc_sensors(ip, modbus_port, query_delay, num_channels, scaling_factor,
             if test_modbus_connectivity(ip, modbus_port):
                 logging.warning(f"Network up, treating as device error for slave {slave_addr}")
                 if attempt < max_retries - 1:
-                    time.sleep(retry_backoff_base ** attempt)
+                    time.sleep((retry_backoff_base ** attempt) + query_delay)
                 else:
                     logging.error(f"Temp read failed after {max_retries} attempts for slave {slave_addr}")
+                    update_comm_stats(slave_addr, False, error_type=ModbusError.UNKNOWN)
                     return f"Error: Failed after {max_retries} attempts for slave {slave_addr}"
             else:
                 network_retry_count += 1
-                if network_retry_count < 3:
-                    logging.warning(f"Network down, retrying ({network_retry_count}/3) for slave {slave_addr}")
+                update_comm_stats(slave_addr, False, error_type=ModbusError.CONNECTION_REFUSED)
+                if network_retry_count < 5:
+                    logging.warning(f"Network down, retrying ({network_retry_count}/5) for slave {slave_addr}")
                     continue
                 else:
-                    logging.error(f"Network down after 3 retries for slave {slave_addr}")
+                    logging.error(f"Network down after 5 retries for slave {slave_addr}")
+                    update_comm_stats(slave_addr, False, error_type=ModbusError.CONNECTION_REFUSED)
                     return f"Error: Network unreachable for slave {slave_addr}"
                     
         except ValueError as e:
@@ -613,24 +724,70 @@ def read_ntc_sensors(ip, modbus_port, query_delay, num_channels, scaling_factor,
             
             if test_modbus_connectivity(ip, modbus_port):
                 if attempt < max_retries - 1:
-                    time.sleep(retry_backoff_base ** attempt)
+                    time.sleep((retry_backoff_base ** attempt) + query_delay)
                 else:
                     logging.error(f"Temp read failed after {max_retries} attempts for slave {slave_addr}")
+                    update_comm_stats(slave_addr, False, error_type=ModbusError.UNKNOWN)
                     return f"Error: Failed after {max_retries} attempts for slave {slave_addr}"
             else:
                 network_retry_count += 1
-                if network_retry_count < 3:
-                    logging.warning(f"Network down, retrying ({network_retry_count}/3) for slave {slave_addr}")
+                update_comm_stats(slave_addr, False, error_type=ModbusError.CONNECTION_REFUSED)
+                if network_retry_count < 5:
+                    logging.warning(f"Network down, retrying ({network_retry_count}/5) for slave {slave_addr}")
                     continue
                 else:
-                    logging.error(f"Network down after 3 retries for slave {slave_addr}")
+                    logging.error(f"Network down after 5 retries for slave {slave_addr}")
+                    update_comm_stats(slave_addr, False, error_type=ModbusError.CONNECTION_REFUSED)
                     return f"Error: Network unreachable for slave {slave_addr}"
                     
         except Exception as e:
-            logging.error(f"Unexpected error in temp read for slave {slave_addr}: {str(e)}")
-            return f"Error: Unexpected failure for slave {slave_addr}"
+            logging.warning(f"Temp read unexpected error for slave {slave_addr}: {str(e)}")
     
-    return f"Error: All retries exhausted for slave {slave_addr}"
+    # All retries exhausted - use cached values with enhanced error handling
+    logging.warning(f"All retries exhausted for slave {slave_addr}, using cached values")
+    temperatures = []
+    errors = []
+    
+    for ch in range(num_channels):
+        cache_key = f"{slave_addr}:{ch+1}"
+        last_good = last_good_temps.get(cache_key)
+        
+        if last_good is not None and REASONABLE_TEMP_MIN <= last_good <= REASONABLE_TEMP_MAX:
+            temperatures.append(last_good)
+            consecutive_failures[cache_key] = consecutive_failures.get(cache_key, 0) + 1
+            failures = consecutive_failures[cache_key]
+            
+            if failures >= CONSECUTIVE_FAILURE_THRESHOLD:
+                if not errors:
+                    errors.append(f"Error: Slave {slave_addr} had {CONSECUTIVE_FAILURE_THRESHOLD} consecutive failures")
+                logging.error(f"Sensor {ch+1} on slave {slave_addr}: {CONSECUTIVE_FAILURE_THRESHOLD} consecutive failures, using cached value")
+        else:
+            temperatures.append(None)
+            consecutive_failures[cache_key] = 0
+            if cache_key not in errors:
+                errors.append(f"Error: No valid cached value for sensor {ch+1} on slave {slave_addr}")
+    
+    if errors:
+        logging.error(f"Temp read errors for slave {slave_addr}: {len(errors)} sensors failed")
+    
+    return temperatures
+
+
+
+def update_temp_cache(slave_addr, temperatures):
+    """
+    Update the cache of last known good temperatures.
+    Called after successful sensor reads to store valid values.
+    
+    Args:
+        slave_addr (int): The Modbus slave address.
+        temperatures (list): List of temperature values from sensors.
+    """
+    for ch, temp in enumerate(temperatures):
+        cache_key = f"{slave_addr}:{ch+1}"
+        if temp is not None and REASONABLE_TEMP_MIN <= temp <= REASONABLE_TEMP_MAX:
+            last_good_temps[cache_key] = temp
+            consecutive_failures[cache_key] = 0  # Reset failure count on success
 
 def load_config(data_dir):
     """
@@ -1985,8 +2142,28 @@ def draw_tui(stdscr, voltages, calibrated_temps, raw_temps, offsets, bank_stats,
     curses.init_pair(6, curses.COLOR_YELLOW, -1)
     curses.init_pair(7, curses.COLOR_CYAN, -1)
     curses.init_pair(8, curses.COLOR_MAGENTA, -1)
-    # Screen size.
-    height, width = stdscr.getmaxyx()
+    # Screen size (needed early for comm stats display)
+    screen_height, screen_width = stdscr.getmaxyx()
+    
+    # Communication Quality Display (bottom right)
+    try:
+        comm_stats = get_comm_stats()
+        comm_str = "Comm: "
+        for slave in comm_stats.get('slaves', []):
+            rate = slave.get('success_rate', 0)
+            comm_str += f"S{slave['slave_addr']}:{rate}% "
+        # Position at bottom right
+        display_y = max(0, screen_height - 2)
+        display_x = max(0, screen_width - len(comm_str) - 2)
+        try:
+            stdscr.addstr(display_y, display_x, comm_str, curses.color_pair(4) | curses.A_BOLD)
+        except curses.error:
+            pass
+    except Exception as e:
+        pass  # Silent fail for display errors
+    
+    # Reassign to standard names for rest of function
+    height, width = screen_height, screen_width
     right_half_x = width // 2
     # Total voltage and color.
     total_v = sum(voltages)
@@ -2104,11 +2281,13 @@ def draw_tui(stdscr, voltages, calibrated_temps, raw_temps, offsets, bank_stats,
                 detail = f" ({raw_str}/{offset_str})"
             else:
                 detail = ""
-            t_str = f"Bat {bat_id} Local C{local_ch}: {calib_str}{detail}"
+            # Compact display format - show all sensors
+            # Format: BatX-CY: VAL
+            t_str = f"B{bat_id}-C{local_ch}:{calib_str}{detail}"
             # Color.
             t_color = curses.color_pair(8) if "Inv" in calib_str else \
-                     curses.color_pair(2) if calib > settings['high_threshold'] else \
-                     curses.color_pair(3) if calib < settings['low_threshold'] else \
+                     curses.color_pair(2) if calib is not None and calib > settings['high_threshold'] else \
+                     curses.color_pair(3) if calib is not None and calib < settings['low_threshold'] else \
                      curses.color_pair(4)
             if y_offset < height and len(t_str) < right_half_x:
                 try:
@@ -2171,7 +2350,7 @@ def draw_tui(stdscr, voltages, calibrated_temps, raw_temps, offsets, bank_stats,
         f"Sensors per Bank per Battery: {settings['sensors_per_bank']}",
         f"Polling Interval: {settings['poll_interval']} seconds",
         f"Temperature IP Address: {settings['ip']}",
-        f"Modbus TCP Port: {settings['modbus_port']}",
+        f"Modbus TCP Ports: {settings['modbus_slave_ports']},"
         f"High Temperature Threshold: {settings['high_threshold']}°C",
         f"Low Temperature Threshold: {settings['low_threshold']}°C",
         f"Absolute Deviation Threshold: {settings['abs_deviation_threshold']}°C",
@@ -2865,6 +3044,10 @@ def start_web_server(settings):
             <div id="battery-container" class="grid"></div>
         </div>
         <div class="status-card light">
+            <h2>Communication Health</h2>
+            <div id="comm-stats-container"></div>
+        </div>
+        <div class="status-card light">
             <h2>Time-Series Charts</h2>
             <canvas id="bmsChart" width="800" height="400"></canvas>
         </div>
@@ -3003,6 +3186,46 @@ def start_web_server(settings):
         updateChart();
         setInterval(updateStatus, 5000);
         setInterval(updateChart, 60000);
+
+        function updateCommStats() {{
+            fetch('/api/comm_stats')
+                .then(function(response) {{ return response.json(); }})
+                .then(function(data) {{
+                    var container = document.getElementById('comm-stats-container');
+                    if (!container) return;
+                    
+                    if (data.slaves && data.slaves.length > 0) {{
+                        var html = '<table style="width:100%; border-collapse: collapse;">';
+                        html += '<tr style="background:#444; color:#fff;"><th>Slave</th><th>Success</th><th>Fail</th><th>Rate</th><th>Last Error</th></tr>';
+                        data.slaves.forEach(function(slave, index) {{
+                            var rowBg = index % 2 === 0 ? '#f9f9f9' : '#eee';
+                            var rateColor = slave.success_rate >= 80 ? 'green' : (slave.success_rate >= 50 ? 'orange' : 'red');
+                            var lastError = slave.last_error_type ? slave.last_error_type : (slave.last_error ? new Date(slave.last_error * 1000).toLocaleString() : 'None');
+                            html += '<tr style="background:' + rowBg + ';">';
+                            html += '<td style="padding:5px;">S' + slave.slave_addr + '</td>';
+                            html += '<td style="padding:5px;">' + slave.success_count + '</td>';
+                            html += '<td style="padding:5px;">' + slave.fail_count + '</td>';
+                            html += '<td style="padding:5px; color:' + rateColor + '; font-weight:bold;">' + slave.success_rate + '%</td>';
+                            html += '<td style="padding:5px;">' + lastError + '</td>';
+                            html += '</tr>';
+                        }});
+                        html += '</table>';
+                        html += '<p style="margin-top:10px; font-size:0.9em;">Total: ' + data.total_success + ' success, ' + data.total_fail + ' fail</p>';
+                        container.innerHTML = html;
+                    }} else {{
+                        container.innerHTML = '<p>No communication data available</p>';
+                    }}
+                }})
+                .catch(function(error) {{
+                    console.error('Error fetching comm stats:', error);
+                    var container = document.getElementById('comm-stats-container');
+                    if (container) {{
+                        container.innerHTML = '<p class="alert">Error loading communication statistics</p>';
+                    }}
+                }});
+        }}
+
+        setInterval(updateCommStats, 10000);
     </script>
 </body>
 </html>"""
@@ -3041,6 +3264,16 @@ def start_web_server(settings):
             return jsonify({'history': history})
         except Exception as e:
             logging.error(f"Error in /api/history: {str(e)}\n{traceback.format_exc()}")
+            return jsonify({'error': str(e)}), 500
+    
+    # API for communication statistics
+    @app.route('/api/comm_stats')
+    def api_comm_stats():
+        try:
+            stats = get_comm_stats()
+            return jsonify(stats)
+        except Exception as e:
+            logging.error(f"Error in /api/comm_stats: {str(e)}\n{traceback.format_exc()}")
             return jsonify({'error': str(e)}), 500
     # API for balance trigger.
     @app.route('/api/balance', methods=['POST'])
@@ -3117,7 +3350,7 @@ def main(stdscr):
     curses.init_pair(8, curses.COLOR_MAGENTA, -1)
     stdscr.nodelay(True)
     # Globals.
-    global previous_temps, previous_bank_medians, run_count, startup_offsets, startup_median, startup_set, battery_voltages, web_data, balancing_active, BANK_SENSOR_INDICES, alive_timestamp, NUM_BANKS, balancer_failed
+    global previous_temps, previous_bank_medians, run_count, startup_offsets, startup_median, startup_set, battery_voltages, web_data, balancing_active, BANK_SENSOR_INDICES, alive_timestamp, NUM_BANKS, balancer_failed, comm_stats
     # Load and validate config.
     settings = load_config(data_dir)
     validate_config(settings)
@@ -3143,6 +3376,8 @@ def main(stdscr):
     # Setup.
     setup_hardware(settings)
     time.sleep(1) # Short delay to allow hardware initialization
+    # Initialize communication statistics
+    init_comm_stats(slave_addresses)
     # Web.
     start_web_server(settings)
     # Self-test.
@@ -3176,7 +3411,9 @@ def main(stdscr):
             temp_result = read_ntc_sensors(
                 settings['ip'], settings['modbus_port'], settings['query_delay'],
                 sensors_per_battery, settings['scaling_factor'],
-                settings['max_retries'], settings['retry_backoff_base'], slave_addr=addr
+                settings['max_retries'], settings['retry_backoff_base'], slave_addr=addr,
+                slave_ports=settings.get('modbus_slave_ports'),
+                slave_addresses=settings['modbus_slave_addresses']
             )
             if isinstance(temp_result, str):
                 temps_alerts.append(f"Modbus slave {addr} failed: {temp_result}")

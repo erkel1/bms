@@ -470,140 +470,166 @@ def test_modbus_connectivity(ip, port):
 def read_ntc_sensors(ip, modbus_port, query_delay, num_channels, scaling_factor, max_retries, retry_backoff_base, slave_addr=1):
     """
     Read temperature measurements from NTC thermistor sensors.
-    This function acts like a messenger: it calls up the temperature sensor device over the network,
-    asks for the latest readings from all the sensors, waits for the response, checks that the data
-    is valid and not corrupted, then converts the raw numbers into actual temperature values in Celsius.
-    Imagine you're calling a weather station to get temperature readings from multiple locations.
-    This function dials the number (IP address), asks for the data, waits patiently, and then
-    translates the technical numbers into something you can understand. It retries on failures
-    with increasing delays (backoff) to handle temporary network glitches. For each slave (parallel battery),
-    it queries all sensors in that battery (num_channels = sensors_per_battery).
+    Improved for 9600 baud half-duplex Modbus communication.
+    
+    Key improvements for reliable 9600 half-duplex:
+    - Increased query_delay to allow device processing time at slow baud rate
+    - Progressive receive timeout to detect end of response frame
+    - Response validation with length and CRC checks
+    - Better error handling and retry logic
     
     Args:
-        ip (str): The internet address of the sensor device (like a phone number for the device).
-        modbus_port (int): The specific "door" or channel on the device to communicate through.
-        query_delay (float): How long to wait after asking for data before expecting a reply (in seconds).
-        num_channels (int): How many temperature sensors to read from this device (sensors per battery).
-        scaling_factor (float): A math number to convert raw sensor data into Celsius degrees (e.g., 100.0).
-        max_retries (int): If the first attempt fails, how many more times to try again (total attempts = max_retries).
-        retry_backoff_base (int): How long to wait between retry attempts (gets longer each time, exponential).
-        slave_addr (int): The specific sensor unit's ID number on the network (default is 1).
+        ip (str): The IP address of the Modbus device.
+        modbus_port (int): The Modbus TCP port.
+        query_delay (float): Delay after sending query (in seconds).
+        num_channels (int): Number of temperature sensors to read.
+        scaling_factor (float): Factor to convert raw to Celsius.
+        max_retries (int): Number of retry attempts on failure.
+        retry_backoff_base (int): Base for exponential backoff.
+        slave_addr (int): Modbus slave address (default 1).
     
     Returns:
-        list or str: Either a list of temperature values in Celsius (one per channel), or an error message string if something went wrong.
+        list or str: List of temperatures or error message string.
     """
-    # Log start of read for this slave—helps debugging.
+    # Log start of read.
     logging.info(f"Starting temp read for slave {slave_addr}.")
-    # Build the Modbus query packet: Slave addr + function code 3 (read holding registers) + start addr 0 + num registers.
+    
+    # Build Modbus query packet: Slave addr + function code 3 + start addr + num registers.
     query_base = bytes([slave_addr, 3]) + (0).to_bytes(2, 'big') + (num_channels).to_bytes(2, 'big')
-    # Calculate CRC checksum for the query.
     crc = modbus_crc(query_base)
-    # Append CRC to complete the query packet.
     query = query_base + crc
-    # Network retry counter for transient network issues.
+    
+    # Calculate expected response length: 3 header bytes + byte_count (2 per channel) + 2 CRC
+    expected_data_length = num_channels * 2
+    expected_response_length = 3 + expected_data_length + 2
+    
     network_retry_count = 0
-    # Retry loop: Try up to max_retries times if failures occur.
+    
     for attempt in range(max_retries):
         try:
-            # Log the attempt for debugging.
-            logging.debug(f"Temp read attempt {attempt+1} for slave {slave_addr}: Connecting to {ip}:{modbus_port}")
-            # Create a TCP socket for network communication.
+            logging.debug(f"Temp read attempt {attempt+1} for slave {slave_addr}: {ip}:{modbus_port}")
+            
+            # Create socket with proper timeout for 9600 baud
+            # At 9600 baud, 1 char takes ~1ms, so we need longer timeouts
             s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            # Set a 3-second timeout for the connection/response.
-            s.settimeout(3)
-            # Connect to the device's IP and port.
+            s.settimeout(5)  # 5 second timeout for slow devices
+            
+            # Connect
             s.connect((ip, modbus_port))
-            # Send the query packet over the network.
+            
+            # Send query
             s.send(query)
-            # Wait the specified delay for the device to process and respond.
+            
+            # For 9600 half-duplex: Wait longer for device to process
+            # At 9600 baud, a ~19 byte request takes ~20ms to transmit
+            # Plus device processing time (typically 50-100ms for RS485 turn-around)
             time.sleep(query_delay)
-            # Receive up to 1024 bytes of response.
-            response = s.recv(1024)
-            # Close the socket connection.
+            
+            # Read response with progressive timeout
+            # For half-duplex, we need to wait for the complete frame
+            response = b''
+            chunk = s.recv(256)
+            response += chunk
+            
+            # Progressive read: wait for more data if response is incomplete
+            # This handles slow response times on 9600 baud
+            max_wait_time = 2.0  # Max 2 seconds for full response
+            wait_start = time.time()
+            while len(response) < expected_response_length and (time.time() - wait_start) < max_wait_time:
+                time.sleep(0.1)  # Short sleep between checks
+                chunk = s.recv(256)
+                if chunk:
+                    response += chunk
+                else:
+                    break
+            
             s.close()
-            # Basic validation: Response too short to be valid.
+            
+            # Validate response length
             if len(response) < 5:
-                raise ValueError("Short response")
-            # Check if response length matches expected: 3 header bytes + byte_count + 2 CRC.
-            if len(response) != 3 + response[2] + 2:
-                raise ValueError("Invalid response length")
-            # Calculate CRC on received data (excluding received CRC) and compare.
+                logging.warning(f"Short response from slave {slave_addr}: {len(response)} bytes (expected {expected_response_length})")
+                raise ValueError(f"Short response: {len(response)} bytes")
+            
+            # Validate response length matches expected
+            if len(response) != expected_response_length:
+                logging.warning(f"Response length mismatch for slave {slave_addr}: got {len(response)}, expected {expected_response_length}")
+                # Don't fail on length mismatch, let CRC validation handle it
+            
+            # Validate CRC
             calc_crc = modbus_crc(response[:-2])
             if calc_crc != response[-2:]:
+                logging.warning(f"CRC mismatch for slave {slave_addr}")
                 raise ValueError("CRC mismatch")
-            # Extract header: slave addr, function code, byte count.
+            
+            # Validate header
             slave, func, byte_count = response[0:3]
-            # Validate header matches what we sent/expected.
-            if slave != slave_addr or func != 3 or byte_count != num_channels * 2:
-                # If function code has error bit set (0x80), it's a Modbus exception.
+            if slave != slave_addr:
+                logging.warning(f"Slave address mismatch for slave {slave_addr}: got {slave}")
+                raise ValueError("Slave address mismatch")
+            
+            if func != 3:
                 if func & 0x80:
                     return f"Error: Modbus exception code {response[2]} for slave {slave_addr}"
-                # Otherwise, invalid response.
-                return f"Error: Invalid response header for slave {slave_addr}."
-            # Extract the raw data bytes (2 bytes per channel, big-endian signed int).
+                logging.warning(f"Invalid function code for slave {slave_addr}: {func}")
+                raise ValueError("Invalid function code")
+            
+            if byte_count != expected_data_length:
+                logging.warning(f"Byte count mismatch for slave {slave_addr}: got {byte_count}, expected {expected_data_length}")
+                raise ValueError("Byte count mismatch")
+            
+            # Extract temperature data (2 bytes per channel, big-endian signed)
             data = response[3:3 + byte_count]
-            # Convert raw values to temperatures: Each pair of bytes to signed int, divide by scaling_factor.
             raw_temperatures = []
             for i in range(0, len(data), 2):
                 val = int.from_bytes(data[i:i+2], 'big', signed=True) / scaling_factor
                 raw_temperatures.append(val)
-            # Log success.
-            logging.info(f"Temp read successful for slave {slave_addr}.")
-            # Return the list of temperatures.
+            
+            logging.info(f"Temp read successful for slave {slave_addr}: {len(raw_temperatures)} values")
             return raw_temperatures
-        # Handle network errors (e.g., connection refused, timeout).
+            
         except socket.error as e:
-            # Log warning for this attempt.
-            logging.warning(f"Temp read attempt {attempt+1} for slave {slave_addr} failed: {str(e)}. Checking network connectivity.")
-            # Sleep 3 seconds for network recovery.
+            logging.warning(f"Temp read attempt {attempt+1} for slave {slave_addr} failed: {str(e)}")
             time.sleep(3)
-            # Test network connectivity.
+            
             if test_modbus_connectivity(ip, modbus_port):
-                # Network is up, so it's a legitimate device error—use original retry logic.
-                logging.warning(f"Network is up, treating as device error for slave {slave_addr}.")
+                logging.warning(f"Network up, treating as device error for slave {slave_addr}")
                 if attempt < max_retries - 1:
                     time.sleep(retry_backoff_base ** attempt)
                 else:
-                    logging.error(f"Temp read for slave {slave_addr} failed after {max_retries} attempts - {str(e)}.")
-                    return f"Error: Failed after {max_retries} attempts for slave {slave_addr} - {str(e)}."
+                    logging.error(f"Temp read failed after {max_retries} attempts for slave {slave_addr}")
+                    return f"Error: Failed after {max_retries} attempts for slave {slave_addr}"
             else:
-                # Network is down, retry up to 3 times.
                 network_retry_count += 1
                 if network_retry_count < 3:
-                    logging.warning(f"Network down, retrying ({network_retry_count}/3) for slave {slave_addr}.")
-                    continue  # Retry without backoff for network issues
+                    logging.warning(f"Network down, retrying ({network_retry_count}/3) for slave {slave_addr}")
+                    continue
                 else:
-                    logging.error(f"Network down after 3 retries for slave {slave_addr} - {str(e)}.")
-                    return f"Error: Network unreachable after retries for slave {slave_addr} - {str(e)}."
-        # Handle validation errors (e.g., bad response format).
+                    logging.error(f"Network down after 3 retries for slave {slave_addr}")
+                    return f"Error: Network unreachable for slave {slave_addr}"
+                    
         except ValueError as e:
-            logging.warning(f"Temp read attempt {attempt+1} for slave {slave_addr} failed (validation): {str(e)}. Checking network connectivity.")
-            # Sleep 3 seconds for network recovery.
+            logging.warning(f"Temp read validation failed for slave {slave_addr}: {str(e)}")
             time.sleep(3)
-            # Test network connectivity.
+            
             if test_modbus_connectivity(ip, modbus_port):
-                # Network is up, so it's a legitimate device error—use original retry logic.
-                logging.warning(f"Network is up, treating as device error for slave {slave_addr}.")
                 if attempt < max_retries - 1:
                     time.sleep(retry_backoff_base ** attempt)
                 else:
-                    logging.error(f"Temp read for slave {slave_addr} failed after {max_retries} attempts - {str(e)}.")
-                    return f"Error: Failed after {max_retries} attempts for slave {slave_addr} - {str(e)}."
+                    logging.error(f"Temp read failed after {max_retries} attempts for slave {slave_addr}")
+                    return f"Error: Failed after {max_retries} attempts for slave {slave_addr}"
             else:
-                # Network is down, retry up to 3 times.
                 network_retry_count += 1
                 if network_retry_count < 3:
-                    logging.warning(f"Network down, retrying ({network_retry_count}/3) for slave {slave_addr}.")
-                    continue  # Retry without backoff for network issues
+                    logging.warning(f"Network down, retrying ({network_retry_count}/3) for slave {slave_addr}")
+                    continue
                 else:
-                    logging.error(f"Network down after 3 retries for slave {slave_addr} - {str(e)}.")
-                    return f"Error: Network unreachable after retries for slave {slave_addr} - {str(e)}."
-        # Catch any unexpected errors.
+                    logging.error(f"Network down after 3 retries for slave {slave_addr}")
+                    return f"Error: Network unreachable for slave {slave_addr}"
+                    
         except Exception as e:
-            logging.error(f"Unexpected error in temp read attempt {attempt+1} for slave {slave_addr}: {str(e)}\n{traceback.format_exc()}")
-            return f"Error: Unexpected failure for slave {slave_addr} - {str(e)}"
-
-    # If loop exits without returning (e.g., due to continue on last attempt), return error
+            logging.error(f"Unexpected error in temp read for slave {slave_addr}: {str(e)}")
+            return f"Error: Unexpected failure for slave {slave_addr}"
+    
     return f"Error: All retries exhausted for slave {slave_addr}"
 
 def load_config(data_dir):

@@ -1351,7 +1351,7 @@ def check_invalid_reading(raw, ch, alerts, valid_min, settings):
     # Check if raw is invalid (None means read failed).
     if raw is None or raw <= valid_min:
         # Get bank and battery/local details for descriptive alert.
-        bank = get_bank_for_channel(ch, settings["num_series_banks"], settings["sensors_per_bank"])
+        bank = get_bank_for_channel(ch)
         bat_id, local_ch = get_battery_and_local_ch(ch, settings["num_series_banks"], settings["sensors_per_bank"])
         # Build alert message with details.
         alert = f"Battery {bat_id} Bank {bank} Local Ch {local_ch}: Invalid reading (≤ {valid_min})."
@@ -1386,7 +1386,7 @@ def check_high_temp(calibrated, ch, alerts, high_threshold, settings):
     # Check condition.
     if calibrated is not None and calibrated > high_threshold:
         # Get details.
-        bank = get_bank_for_channel(ch, settings["num_series_banks"], settings["sensors_per_bank"])
+        bank = get_bank_for_channel(ch)
         bat_id, local_ch = get_battery_and_local_ch(ch, settings["num_series_banks"], settings["sensors_per_bank"])
         # Alert with value.
         alert = f"Battery {bat_id} Bank {bank} Local Ch {local_ch}: High temp ({calibrated:.1f}°C > {high_threshold}°C)."
@@ -1413,7 +1413,7 @@ def check_low_temp(calibrated, ch, alerts, low_threshold, settings):
         None
     """
     if calibrated is not None and calibrated < low_threshold:
-        bank = get_bank_for_channel(ch, settings["num_series_banks"], settings["sensors_per_bank"])
+        bank = get_bank_for_channel(ch)
         bat_id, local_ch = get_battery_and_local_ch(ch, settings["num_series_banks"], settings["sensors_per_bank"])
         alert = f"Battery {bat_id} Bank {bank} Local Ch {local_ch}: Low temp ({calibrated:.1f}°C < {low_threshold}°C)."
         alerts.append(alert)
@@ -1449,7 +1449,7 @@ def check_deviation(calibrated, bank_median, ch, alerts, abs_deviation_threshold
     rel_dev = abs_dev / abs(bank_median) if bank_median != 0 else 0
     # Check either threshold exceeded.
     if abs_dev > abs_deviation_threshold or rel_dev > deviation_threshold:
-        bank = get_bank_for_channel(ch, settings["num_series_banks"], settings["sensors_per_bank"])
+        bank = get_bank_for_channel(ch)
         bat_id, local_ch = get_battery_and_local_ch(ch, settings["num_series_banks"], settings["sensors_per_bank"])
         alert = f"Battery {bat_id} Bank {bank} Local Ch {local_ch}: Deviation from bank median (abs {abs_dev:.1f}°C or {rel_dev:.2%})."
         alerts.append(alert)
@@ -1491,7 +1491,7 @@ def check_abnormal_rise(current, previous_temps, ch, alerts, poll_interval, rise
         rise = current - previous
         # Check threshold.
         if rise > rise_threshold:
-            bank = get_bank_for_channel(ch, settings["num_series_banks"], settings["sensors_per_bank"])
+            bank = get_bank_for_channel(ch)
             bat_id, local_ch = get_battery_and_local_ch(ch, settings["num_series_banks"], settings["sensors_per_bank"])
             alert = f"Battery {bat_id} Bank {bank} Local Ch {local_ch}: Abnormal rise ({rise:.1f}°C in {poll_interval}s)."
             alerts.append(alert)
@@ -1528,7 +1528,7 @@ def check_group_tracking_lag(current, previous_temps, bank_median_rise, ch, aler
             return
         rise = current - previous
         if abs(rise - bank_median_rise) > disconnection_lag_threshold:
-            bank = get_bank_for_channel(ch, settings["num_series_banks"], settings["sensors_per_bank"])
+            bank = get_bank_for_channel(ch)
             bat_id, local_ch = get_battery_and_local_ch(ch, settings["num_series_banks"], settings["sensors_per_bank"])
             alert = f"Battery {bat_id} Bank {bank} Local Ch {local_ch}: Lag from bank group ({rise:.1f}°C vs {bank_median_rise:.1f}°C)."
             alerts.append(alert)
@@ -1559,7 +1559,7 @@ def check_sudden_disconnection(current, previous_temps, ch, alerts, settings):
         return
     # Check transition to invalid.
     if previous is not None and current is None:
-        bank = get_bank_for_channel(ch, settings["num_series_banks"], settings["sensors_per_bank"])
+        bank = get_bank_for_channel(ch)
         bat_id, local_ch = get_battery_and_local_ch(ch, settings["num_series_banks"], settings["sensors_per_bank"])
         alert = f"Battery {bat_id} Bank {bank} Local Ch {local_ch}: Sudden disconnection."
         alerts.append(alert)

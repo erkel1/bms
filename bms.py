@@ -3078,6 +3078,7 @@ def startup_self_test(settings, stdscr, data_dir):
                         logging.warning("addstr error for testing balance.")
                 stdscr.refresh()
                 logging.info(f"Testing balance from Bank {source} to Bank {dest} for {test_duration}s.")
+
                 # Check temps for anomalies.
                 temp_anomaly = False
                 if all_initial_temps:
@@ -3105,6 +3106,27 @@ def startup_self_test(settings, stdscr, data_dir):
                 initial_dest_v = read_voltage_with_retry(dest, settings)[0] or 0.0
                 time.sleep(0.5)
                 logging.debug(f"Balance test from Bank {source} to Bank {dest}: Initial - Bank {source}={initial_source_v:.2f}V, Bank {dest}={initial_dest_v:.2f}V")
+                # Check source voltage is high enough for DC-DC converter to operate
+                min_src_voltage = settings.get('min_balance_source_voltage', 17.0)
+                if initial_source_v < min_src_voltage:
+                    # Turn off any relays that might be on
+                    control_dcdc_converter(False, settings)
+                    time.sleep(0.2)
+                    set_relay_connection(0, 0, settings)
+                    # Log as warning, NOT as failure - DC-DC just can't operate at this voltage
+                    warning = f"Skipped: Bank {source} voltage {initial_source_v:.2f}V < {min_src_voltage:.1f}V minimum (DC-DC won't start)."
+                    event_log.append(f"{time.strftime('%Y-%m-%d %H:%M:%S')}: Skipped balance test from Bank {source} to Bank {dest}: Source voltage {initial_source_v:.2f}V < {min_src_voltage:.1f}V.")
+                    if len(event_log) > settings.get('EventLogSize', 20):
+                        event_log.pop(0)
+                    logging.warning(f"Skipping balance test from Bank {source} to Bank {dest}: Source voltage too low ({initial_source_v:.2f}V < {min_src_voltage:.1f}V)")
+                    if y + 1 < stdscr.getmaxyx()[0]:
+                        try:
+                            stdscr.addstr(y + 1, 0, warning, curses.color_pair(3))  # Yellow for warning
+                        except curses.error:
+                            logging.warning("addstr error for skipped low voltage.")
+                    y += 2
+                    stdscr.refresh()
+                    continue
                 # Start test balance.
                 set_relay_connection(source, dest, settings)
                 time.sleep(0.5)  # Allow relays to settle
@@ -3250,19 +3272,22 @@ def startup_self_test(settings, stdscr, data_dir):
                 stdscr.refresh()
                 y = progress_y + 2
                 time.sleep(2)
-        # Set alerts.
+        # Set alerts (warnings from skipped tests are not in 'alerts' list)
         startup_alerts = alerts
-        # If alerts, handle failure.
-        if alerts:
+        # Only count actual FAILED tests as failures - skipped tests are expected when voltage is low.
+        actual_failures = [a for a in alerts if not a.startswith('Skipping balance test')]
+        # If actual failures exist, handle failure. If only skips, it's still a success.
+        if actual_failures:
             startup_failed = True
-            logging.error("Startup self-test failures: " + "; ".join(alerts))
-            send_alert_email("Startup self-test failures:\n" + "\n".join(alerts), settings)
+            logging.error("Startup self-test failures: " + "; ".join(actual_failures))
+            send_alert_email("Startup self-test failures:\n" + "\n".join(actual_failures), settings)
             if GPIO:
                 GPIO.output(settings['AlarmRelayPin'], GPIO.HIGH)
             stdscr.clear()
             if stdscr.getmaxyx()[0] > 0:
                 try:
-                    stdscr.addstr(0, 0, "Startup failures: " + "; ".join(alerts), curses.color_pair(2))
+                    failure_msg = "; ".join(actual_failures) if actual_failures else "No failures (skips due to low voltage)"
+                    stdscr.addstr(0, 0, "Startup failures: " + failure_msg, curses.color_pair(2))
                 except curses.error:
                     logging.warning("addstr error for self-test failures.")
             if stdscr.getmaxyx()[0] > 2:
@@ -3272,7 +3297,10 @@ def startup_self_test(settings, stdscr, data_dir):
                     logging.warning("addstr error for retry message.")
             stdscr.refresh()
             # Update web.
-            web_data['system_status'] = f'Startup Self-Test Failed - Retry {retries + 1}/{max_retries}'
+            if actual_failures:
+                web_data['system_status'] = f'Startup Self-Test Failed - Retry {retries + 1}/{max_retries}'
+            else:
+                web_data['system_status'] = f'Startup Self-Test Passed (skipped low-voltage tests)'
             web_data['alerts'] = startup_alerts
             web_data['last_update'] = time.time()
             retries += 1
@@ -3294,6 +3322,7 @@ def startup_self_test(settings, stdscr, data_dir):
                     stdscr.addstr(0, 0, "Self-Test Passed. Proceeding to main loop.", curses.color_pair(4))
                 except curses.error:
                     logging.warning("addstr error for self-test OK.")
+            web_data['system_status'] = 'Running'
             stdscr.refresh()
             time.sleep(2)
             logging.info("Startup self-test passed.")

@@ -492,7 +492,7 @@ def get_bank_for_channel(ch):
     # If not found in any bank, it's invalid.
     return None
 
-def get_battery_and_local_ch(ch):
+def get_battery_and_local_ch(ch, num_series_banks=None, sensors_per_bank=None):
     """
     Find the parallel battery ID and local channel for a global channel.
     This function breaks down a global sensor ID into which parallel battery it's on and its local position within that battery.
@@ -502,12 +502,18 @@ def get_battery_and_local_ch(ch):
     
     Args:
         ch (int): Global channel (1 to total_channels) - global ID, starting from 1.
+        num_series_banks (int): Number of series banks (from config).
+        sensors_per_bank (int): Sensors per bank (from config).
     
     Returns:
         tuple: (battery_id, local_ch) - battery number (1+), local channel (1 to sensors_per_battery).
     """
-    # Hardcoded: Each parallel battery has 24 sensors (num_series_banks * sensors_per_bank, assuming 3*8=24).
-    sensors_per_battery = 24
+    # Calculate sensors_per_battery from config values
+    if num_series_banks is None:
+        num_series_banks = 3  # fallback
+    if sensors_per_bank is None:
+        sensors_per_bank = 8  # fallback
+    sensors_per_battery = num_series_banks * sensors_per_bank
     # Calculate which battery: Divide global index (0-based) by sensors per battery, add 1 for 1-based.
     bat_id = ((ch - 1) // sensors_per_battery) + 1
     # Local channel: Remainder of division, add 1 for 1-based.
@@ -876,6 +882,10 @@ def load_config(data_dir):
         'sensors_per_bank': config_parser.getint('Temp', 'sensors_per_bank', fallback=8), # New: sensors per bank per battery.
         'num_series_banks': config_parser.getint('General', 'num_series_banks', fallback=3) # New: number of series banks.
     }
+    # Temperature sanity bounds
+    temp_settings['reasonable_temp_min'] = config_parser.getfloat('Temp', 'reasonable_temp_min', fallback=-10.0)
+    temp_settings['reasonable_temp_max'] = config_parser.getfloat('Temp', 'reasonable_temp_max', fallback=60.0)
+    temp_settings['consecutive_failure_threshold'] = config_parser.getint('Temp', 'consecutive_failure_threshold', fallback=5)
     # Parse modbus_slave_ports for per-slave port configuration
     # This allows each slave to use a different Modbus port (e.g., slaves 1-4 on 10003, 5-8 on 10001)
     modbus_slave_ports_str = config_parser.get('Temp', 'modbus_slave_ports', fallback='')
@@ -1341,8 +1351,8 @@ def check_invalid_reading(raw, ch, alerts, valid_min, settings):
     # Check if raw is invalid (None means read failed).
     if raw is None or raw <= valid_min:
         # Get bank and battery/local details for descriptive alert.
-        bank = get_bank_for_channel(ch)
-        bat_id, local_ch = get_battery_and_local_ch(ch)
+        bank = get_bank_for_channel(ch, settings["num_series_banks"], settings["sensors_per_bank"])
+        bat_id, local_ch = get_battery_and_local_ch(ch, settings["num_series_banks"], settings["sensors_per_bank"])
         # Build alert message with details.
         alert = f"Battery {bat_id} Bank {bank} Local Ch {local_ch}: Invalid reading (≤ {valid_min})."
         # Add to alerts list.
@@ -1376,8 +1386,8 @@ def check_high_temp(calibrated, ch, alerts, high_threshold, settings):
     # Check condition.
     if calibrated is not None and calibrated > high_threshold:
         # Get details.
-        bank = get_bank_for_channel(ch)
-        bat_id, local_ch = get_battery_and_local_ch(ch)
+        bank = get_bank_for_channel(ch, settings["num_series_banks"], settings["sensors_per_bank"])
+        bat_id, local_ch = get_battery_and_local_ch(ch, settings["num_series_banks"], settings["sensors_per_bank"])
         # Alert with value.
         alert = f"Battery {bat_id} Bank {bank} Local Ch {local_ch}: High temp ({calibrated:.1f}°C > {high_threshold}°C)."
         alerts.append(alert)
@@ -1403,8 +1413,8 @@ def check_low_temp(calibrated, ch, alerts, low_threshold, settings):
         None
     """
     if calibrated is not None and calibrated < low_threshold:
-        bank = get_bank_for_channel(ch)
-        bat_id, local_ch = get_battery_and_local_ch(ch)
+        bank = get_bank_for_channel(ch, settings["num_series_banks"], settings["sensors_per_bank"])
+        bat_id, local_ch = get_battery_and_local_ch(ch, settings["num_series_banks"], settings["sensors_per_bank"])
         alert = f"Battery {bat_id} Bank {bank} Local Ch {local_ch}: Low temp ({calibrated:.1f}°C < {low_threshold}°C)."
         alerts.append(alert)
         event_log.append(f"{time.strftime('%Y-%m-%d %H:%M:%S')}: {alert}")
@@ -1439,8 +1449,8 @@ def check_deviation(calibrated, bank_median, ch, alerts, abs_deviation_threshold
     rel_dev = abs_dev / abs(bank_median) if bank_median != 0 else 0
     # Check either threshold exceeded.
     if abs_dev > abs_deviation_threshold or rel_dev > deviation_threshold:
-        bank = get_bank_for_channel(ch)
-        bat_id, local_ch = get_battery_and_local_ch(ch)
+        bank = get_bank_for_channel(ch, settings["num_series_banks"], settings["sensors_per_bank"])
+        bat_id, local_ch = get_battery_and_local_ch(ch, settings["num_series_banks"], settings["sensors_per_bank"])
         alert = f"Battery {bat_id} Bank {bank} Local Ch {local_ch}: Deviation from bank median (abs {abs_dev:.1f}°C or {rel_dev:.2%})."
         alerts.append(alert)
         event_log.append(f"{time.strftime('%Y-%m-%d %H:%M:%S')}: {alert}")
@@ -1481,8 +1491,8 @@ def check_abnormal_rise(current, previous_temps, ch, alerts, poll_interval, rise
         rise = current - previous
         # Check threshold.
         if rise > rise_threshold:
-            bank = get_bank_for_channel(ch)
-            bat_id, local_ch = get_battery_and_local_ch(ch)
+            bank = get_bank_for_channel(ch, settings["num_series_banks"], settings["sensors_per_bank"])
+            bat_id, local_ch = get_battery_and_local_ch(ch, settings["num_series_banks"], settings["sensors_per_bank"])
             alert = f"Battery {bat_id} Bank {bank} Local Ch {local_ch}: Abnormal rise ({rise:.1f}°C in {poll_interval}s)."
             alerts.append(alert)
             event_log.append(f"{time.strftime('%Y-%m-%d %H:%M:%S')}: {alert}")
@@ -1518,8 +1528,8 @@ def check_group_tracking_lag(current, previous_temps, bank_median_rise, ch, aler
             return
         rise = current - previous
         if abs(rise - bank_median_rise) > disconnection_lag_threshold:
-            bank = get_bank_for_channel(ch)
-            bat_id, local_ch = get_battery_and_local_ch(ch)
+            bank = get_bank_for_channel(ch, settings["num_series_banks"], settings["sensors_per_bank"])
+            bat_id, local_ch = get_battery_and_local_ch(ch, settings["num_series_banks"], settings["sensors_per_bank"])
             alert = f"Battery {bat_id} Bank {bank} Local Ch {local_ch}: Lag from bank group ({rise:.1f}°C vs {bank_median_rise:.1f}°C)."
             alerts.append(alert)
             event_log.append(f"{time.strftime('%Y-%m-%d %H:%M:%S')}: {alert}")
@@ -1549,8 +1559,8 @@ def check_sudden_disconnection(current, previous_temps, ch, alerts, settings):
         return
     # Check transition to invalid.
     if previous is not None and current is None:
-        bank = get_bank_for_channel(ch)
-        bat_id, local_ch = get_battery_and_local_ch(ch)
+        bank = get_bank_for_channel(ch, settings["num_series_banks"], settings["sensors_per_bank"])
+        bat_id, local_ch = get_battery_and_local_ch(ch, settings["num_series_banks"], settings["sensors_per_bank"])
         alert = f"Battery {bat_id} Bank {bank} Local Ch {local_ch}: Sudden disconnection."
         alerts.append(alert)
         event_log.append(f"{time.strftime('%Y-%m-%d %H:%M:%S')}: {alert}")
@@ -3629,10 +3639,15 @@ def main(stdscr):
     curses.init_pair(9, curses.COLOR_WHITE, -1)     # Spare
     stdscr.nodelay(True)
     # Globals.
-    global previous_temps, previous_bank_medians, run_count, startup_offsets, startup_median, startup_set, battery_voltages, web_data, balancing_active, BANK_SENSOR_INDICES, alive_timestamp, NUM_BANKS, balancer_failed, comm_stats
+    global previous_temps, previous_bank_medians, run_count, startup_offsets, startup_median, startup_set, battery_voltages, web_data, balancing_active, BANK_SENSOR_INDICES, alive_timestamp, NUM_BANKS, balancer_failed, comm_stats, REASONABLE_TEMP_MIN, REASONABLE_TEMP_MAX, CONSECUTIVE_FAILURE_THRESHOLD
     # Load and validate config.
     settings = load_config(data_dir)
     validate_config(settings)
+    # Set config-based globals
+    global REASONABLE_TEMP_MIN, REASONABLE_TEMP_MAX, CONSECUTIVE_FAILURE_THRESHOLD
+    REASONABLE_TEMP_MIN = settings.get('reasonable_temp_min', -10.0)
+    REASONABLE_TEMP_MAX = settings.get('reasonable_temp_max', 60.0)
+    CONSECUTIVE_FAILURE_THRESHOLD = settings.get('consecutive_failure_threshold', 5)
     # Set banks.
     NUM_BANKS = settings['num_series_banks'] # Dynamic now.
     number_parallel = settings['number_of_parallel_batteries']

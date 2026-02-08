@@ -1331,6 +1331,62 @@ def save_offsets(startup_median, startup_offsets, data_dir):
         # File write error (e.g., permissions).
         logging.error(f"Failed to save offsets: {e}")
 
+
+def perform_calibration(settings, raw_temps, data_dir):
+    """
+    Perform temperature sensor calibration.
+    
+    IMPORTANT: Calibration should only be done during initial commissioning when all
+    batteries are at the SAME temperature (thermal equilibrium). The offsets.txt file
+    should be created once and preserved - never auto-recalculated during normal operation.
+    
+    To recalibrate (e.g., after sensor replacement):
+    1. Set recalibrate_offsets = true in battery_monitor.ini
+    2. Restart the BMS script
+    3. Delete offsets.txt to force new calibration
+    
+    Args:
+        settings (dict): Configuration settings.
+        raw_temps (list): Raw temperature readings from all sensors.
+        data_dir (str): Directory containing offsets.txt.
+    
+    Returns:
+        tuple: (startup_median, startup_offsets)
+    """
+    offsets_file = os.path.join(data_dir, 'offsets.txt')
+    
+    # Check if offsets already exist
+    if os.path.exists(offsets_file):
+        # Load existing offsets - NEVER auto-recalculate
+        startup_median, startup_offsets = load_offsets(settings['total_channels'], data_dir)
+        if startup_offsets is not None:
+            logging.info(f"Loaded existing calibration: Median={startup_median:.1f}C (offsets.txt)")
+            return startup_median, startup_offsets
+    
+    # First time calibration (commissioning) or forced recalibration
+    # Only calculate if we have valid readings from all sensors
+    valid_count = sum(1 for t in raw_temps if t is not None and t > settings['valid_min'])
+    if valid_count < settings['total_channels']:
+        logging.warning(f"Incomplete sensor readings ({valid_count}/{settings['total_channels']}). Cannot calibrate.")
+        return None, None
+    
+    # Calculate offsets from median
+    startup_median = statistics.median(raw_temps)
+    startup_offsets = [startup_median - t for t in raw_temps]
+    
+    # Save to file
+    save_offsets(startup_median, startup_offsets, data_dir)
+    
+    if os.path.exists(offsets_file):
+        # Was a recalibration (file existed before)
+        logging.warning(f"Recalibration complete: Median={startup_median:.1f}C (offsets.txt overwritten)")
+    else:
+        # First time calibration
+        logging.info(f"First calibration complete: Median={startup_median:.1f}C (offsets.txt created)")
+    
+    return startup_median, startup_offsets
+
+
 def check_invalid_reading(raw, ch, alerts, valid_min, settings):
     """
     Check if a raw temperature reading is invalid (disconnected sensor).
@@ -3716,36 +3772,13 @@ def main(stdscr):
             else:
                 all_raw_temps.extend(temp_result)
         raw_temps = all_raw_temps
-        # Valid count.
-        valid_count = sum(1 for t in raw_temps if t is not None and t > settings['valid_min'])
-        # Calibrate if first valid full read.
-        # Only recalculate offsets if offsets.txt doesn't exist OR recalibrate_offsets=True in INI
-        recalibrate = settings.get('recalibrate_offsets', False)
-        offsets_exist = os.path.exists(os.path.join(data_dir, 'offsets.txt'))
-        
-        if not startup_set and valid_count == total_channels:
-            if not offsets_exist or recalibrate:
-                # Calculate new offsets
-                startup_median = statistics.median(raw_temps) # Find the middle temperature value
-                startup_offsets = [startup_median - t for t in raw_temps] # Calculate adjustments
-                # Warn if any offset differs by more than 10% from median
-                for i, offset in enumerate(startup_offsets):
-                    if abs(offset) > abs(startup_median * 0.10):
-                        logging.warning(f"Large offset detected: Sensor {i+1} offset {offset:.2f}C ({abs(offset)/abs(startup_median)*100:.1f}% of median {startup_median:.1f}C) - verify sensor is functioning correctly")
-                save_offsets(startup_median, startup_offsets, data_dir) # Save to file
-                startup_set = True
-                if offsets_exist and recalibrate:
-                    logging.info(f"Temp recalibration complete. Median: {startup_median:.1f}°C (forced)")
-                else:
-                    logging.info(f"Temp calibration set. Median: {startup_median:.1f}°C")
-            else:
-                # Load existing offsets - don't recalculate
-                startup_median, startup_offsets = load_offsets(total_channels, data_dir)
-                startup_set = True
-                logging.info(f"Using existing calibration. Median: {startup_median:.1f}°C")
-        # Reset if offsets missing.
-        if startup_set and startup_offsets is None:
-            startup_set = False
+        # Load or create temperature calibration offsets.
+        # perform_calibration() handles all logic:
+        # - If offsets.txt exists, load existing (never auto-recalculate)
+        # - If offsets.txt doesn't exist, calculate and save (commissioning)
+        # - Returns (median, offsets) tuple
+        startup_median, startup_offsets = perform_calibration(settings, raw_temps, data_dir)
+        startup_set = startup_offsets is not None
         # Apply offsets.
         calibrated_temps = [raw_temps[i] + startup_offsets[i] if startup_set and raw_temps[i] is not None and raw_temps[i] > settings['valid_min'] else raw_temps[i] if raw_temps[i] is not None and raw_temps[i] > settings['valid_min'] else None for i in range(total_channels)]
         # Bank stats.

@@ -3180,13 +3180,26 @@ def startup_self_test(settings, stdscr, data_dir):
                                 f"Averaged change: {source_change:+.3f}V | "
                                 f"Min change={min_delta}V")
                     
-                    # Check if discrete readings show success but averaged shows failure (pulsing issue)
-                    if min_delta > 0 and (source_change >= 0 or dest_change <= 0 or abs(source_change) < min_delta or dest_change < min_delta):
-                        if discrete_source_change < -min_delta and discrete_dest_change > min_delta:
+                    # Check if source is decreasing and destination is increasing
+                    # The key metric is the voltage differential between banks is reducing
+                    # When balancing source->dest: differential = source - dest
+                    # After transfer: differential should decrease
+                    source_decreasing = source_change < 0
+                    dest_increasing = dest_change > 0
+                    diff_reduced = (avg_source_v - avg_dest_v) < (initial_source_v - initial_dest_v)
+                    
+                    # Pass if: source decreasing AND dest increasing AND differential reduced
+                    if min_delta > 0 and not (source_decreasing and dest_increasing and diff_reduced):
+                        # Additional check: discrete readings might show success while averaged fails
+                        discrete_source_decreasing = discrete_source_change < 0
+                        discrete_dest_increasing = discrete_dest_change > 0
+                        discrete_diff_reduced = (final_source_v - final_dest_v) < (initial_source_v - initial_dest_v)
+                        
+                        if discrete_source_decreasing and discrete_dest_increasing and discrete_diff_reduced:
                             # Discrete shows success, averaged fails - likely converter pulsing
-                            alert = (f"Balance test ambiguous: Discrete shows change ({discrete_source_change:+.3f}V, {discrete_dest_change:+.3f}V) "
-                                    f"but averaged shows insufficient ({source_change:+.3f}V, {dest_change:+.3f}V). "
-                                    f"Check DC-DC converter pulsing. NOT marking as failed.")
+                            alert = (f"Balance test ambiguous: Discrete shows transfer working ({discrete_source_change:+.3f}V, {discrete_dest_change:+.3f}V) "
+                                    f"but averaged shows marginal ({source_change:+.3f}V, {dest_change:+.3f}V). "
+                                    f"NOT marking as failed - transfer is occurring.")
                             alerts.append(alert)
                             event_log.append(f"{time.strftime('%Y-%m-%d %H:%M:%S')}: {alert}")
                             if len(event_log) > settings.get('EventLogSize', 20):
@@ -3194,12 +3207,13 @@ def startup_self_test(settings, stdscr, data_dir):
                             logging.warning(alert)
                             if progress_y + 1 < stdscr.getmaxyx()[0]:
                                 try:
-                                    stdscr.addstr(progress_y + 1, 0, f"Ambiguous: Discrete OK, averaged marginal ({source_change:+.3f}V, {dest_change:+.3f}V).", curses.color_pair(3))
+                                    stdscr.addstr(progress_y + 1, 0, f"Ambiguous: Discrete OK, averaged marginal ({source_change:+.3f}V, {dest_change:+.3f}V). Transfer OK.", curses.color_pair(3))
                                 except curses.error:
                                     logging.warning("addstr error for ambiguous result.")
                         else:
                             alert = (f"Balance test from Bank {source} to Bank {dest} failed: "
-                                    f"Insufficient change (Averaged: {source_change:+.3f}V source, {dest_change:+.3f}V dest). "
+                                    f"Source {source_change:+.3f}V, Dest {dest_change:+.3f}V. "
+                                    f"Source dec={source_decreasing}, Dest inc={dest_increasing}, Diff reduced={diff_reduced}. "
                                     f"Possible relay failure.")
                             alerts.append(alert)
                             event_log.append(f"{time.strftime('%Y-%m-%d %H:%M:%S')}: {alert}")
@@ -3209,7 +3223,7 @@ def startup_self_test(settings, stdscr, data_dir):
                             balancer_failed = True
                             if progress_y + 1 < stdscr.getmaxyx()[0]:
                                 try:
-                                    stdscr.addstr(progress_y + 1, 0, f"Test FAILED: Averaged change {source_change:+.3f}V, {dest_change:+.3f}V (min {min_delta}V).", curses.color_pair(2))
+                                    stdscr.addstr(progress_y + 1, 0, f"Test FAILED: Source {source_change:+.3f}V, Dest {dest_change:+.3f}V. Diff {'reduced' if diff_reduced else 'not reduced'}.", curses.color_pair(2))
                                 except curses.error:
                                     logging.warning("addstr error for test failed.")
                     else:

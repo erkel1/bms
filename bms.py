@@ -3877,3 +3877,25 @@ if __name__ == '__main__':
         RRD_FILE = os.path.join(data_dir, 'bms.rrd')
         # Run with curses wrapper (handles init/cleanup).
         curses.wrapper(main)
+
+# **Git Workflow (Source of Truth = Production/Pi):**
+# - Production (Pi /projects/battery_balancer) is the source of truth
+# - GitHub is a backup/reference, NOT the source of truth
+# - NEVER pull from GitHub to overwrite production files
+# - ALWAYS commit from production to GitHub after changes
+#
+# **Commands to commit INI or code changes from Pi to GitHub:**
+# 1. SSH to Pi: ssh root@192.168.15.137 (password: battery_base)
+# 2. Navigate to project: cd /projects/battery_balancer
+# 3. Stage changes: git add battery_monitor.ini
+# 4. Commit: git commit -m "Your commit message describing the change"
+# 5. Push to GitHub: git push origin main
+#
+# **Example workflow:**
+# cd /projects/battery_balancer
+# git add battery_monitor.ini
+# git commit -m "Update voltage thresholds for better balancing"
+# git push origin main
+#
+# **Note:** Ensure you're on the 'main' branch (not 'master')
+# GitHub repository: git@github.com:erkel1/bms.git

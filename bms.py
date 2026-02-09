@@ -2201,7 +2201,7 @@ def balance_battery_voltages(stdscr, high, low, settings, temps_alerts, is_heati
                 alert = (f"Balancing failed from Bank {high} to {low}: No voltage change detected "
                         f"(Averaged High change: {high_change:+.3f}V, Low change: {low_change:+.3f}V). "
                         f"Possible relay failure.")
-            temps_alerts.append(alert) # Add to alerts (will trigger check_for_issues)
+            # Alert logged to event_log - balancing failures shown via event history
             event_log.append(f"{time.strftime('%Y-%m-%d %H:%M:%S')}: {alert}")
             if len(event_log) > settings.get('EventLogSize', 20):
                 event_log.pop(0)
@@ -2576,7 +2576,9 @@ def draw_tui(stdscr, voltages, calibrated_temps, raw_temps, offsets, bank_stats,
         
         # Determine row color based on alerts
         row_color = curses.color_pair(4)  # Default green
-        if "H" in row or "L" in row:
+        bracket_start = row.find("["); bracket_end = row.find("]")
+        bracket_content = row[bracket_start:bracket_end+1] if bracket_start >= 0 and bracket_end > bracket_start else ""
+        if "H" in bracket_content or "L" in bracket_content:
             row_color = curses.color_pair(2)  # Red for alerts
         
         if len(row) < right_half_x:
@@ -3191,7 +3193,6 @@ def startup_self_test(settings, stdscr, data_dir):
                     dest_trend.append(dest_v)
                     elapsed = time.time() - start_time
                     if elapsed + read_interval >= test_duration:
-                        final_source_v = source_v
                         final_source_v = source_v
                         final_dest_v = dest_v
                         # Display progress BEFORE turning off converter

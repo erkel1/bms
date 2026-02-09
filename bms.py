@@ -2527,65 +2527,82 @@ def draw_tui(stdscr, voltages, calibrated_temps, raw_temps, offsets, bank_stats,
         if y_offset >= height - 2:
             break
         
-        row = f"Battery {bat_id}  "
+        x_pos = 0
+        # Draw battery label in default color
+        label = f"Battery {bat_id}  "
+        if len(label) < right_half_x:
+            try:
+                stdscr.addstr(y_offset, x_pos, label, curses.color_pair(5))
+                x_pos += len(label)
+            except curses.error:
+                pass
         
         for bank_id in range(NUM_BANKS):
-            # Get 8 cell temps for this battery in this bank
-            cell_str = ""
+            # Draw opening bracket in default color
+            if x_pos + 1 < right_half_x:
+                try:
+                    stdscr.addstr(y_offset, x_pos, "[", curses.color_pair(5))
+                    x_pos += 1
+                except curses.error:
+                    pass
+            
+            # Draw each cell with its individual color
             for sensor_pos in range(sensors_per_bank):
                 global_idx = (bank_id * sensors_per_bank) + ((bat_id - 1) * sensors_per_bank) + sensor_pos
+                char_to_draw = "?"
+                color = curses.color_pair(5)  # Default white
+                
                 if global_idx < len(calibrated_temps):
                     calib = calibrated_temps[global_idx]
                     if calib is not None:
-                        # Color-code dots based on temperature
-                        # Red (>42C overheat), Orange (>35C hot), Yellow (>25C warm)
-                        # Green (15-25C normal), Blue (5-15C cold), Purple (<5C very cold)
-                        # Color-code dots relative to bank median (2.5°C steps)
-                        # Calculate difference from median for this bank
-                        bank_idx = bank_id  # 0-indexed bank
+                        bank_idx = bank_id
                         bank_median = bank_stats[bank_idx]['median'] if bank_idx < len(bank_stats) else calib
                         diff = calib - bank_median if bank_median else 0
+                        disp_temp = calib
                         
-                        # Use CALIBRATED temp for indicators
-                        disp_temp = calib if calib is not None else raw_temps[global_idx] if global_idx < len(raw_temps) and raw_temps[global_idx] is not None else None
-                        
-                        if disp_temp is None:
-                            cell_str += "?"  # Invalid
-                        elif diff >= 3.0 or disp_temp > settings['high_threshold']:
-                            cell_str += "H"  # Hot (>3°C above median or overheat)
+                        if diff >= 3.0 or disp_temp > settings['high_threshold']:
+                            char_to_draw = "H"
+                            color = curses.color_pair(2) | curses.A_BOLD  # Red bold for hot
                         elif diff >= 2.0:
-                            cell_str += "h"  # Warm (>2°C above)
+                            char_to_draw = "h"
+                            color = curses.color_pair(6)  # Orange for warm
                         elif diff >= 1.0:
-                            cell_str += "+"  # Warmish (>1°C above)
+                            char_to_draw = "+"
+                            color = curses.color_pair(3)  # Yellow for warmish
                         elif diff >= -1.0:
-                            cell_str += "."  # Normal (±1°C of median)
+                            char_to_draw = "."
+                            color = curses.color_pair(4)  # Green for normal
                         elif diff >= -2.0:
-                            cell_str += "-"  # Cool (>2°C below)
+                            char_to_draw = "-"
+                            color = curses.color_pair(7)  # Cyan for cool
                         elif diff >= -3.0:
-                            cell_str += "l"  # Cold (>3°C below)
+                            char_to_draw = "l"
+                            color = curses.color_pair(7) | curses.A_BOLD  # Blue bold for cold
                         else:
-                            cell_str += "L"  # Very cold
+                            char_to_draw = "L"
+                            color = curses.color_pair(8) | curses.A_BOLD  # Magenta bold for very cold
                     else:
-                        cell_str += "?"  # Invalid
+                        char_to_draw = "?"
+                        color = curses.color_pair(8)  # Magenta for invalid
                 else:
-                    cell_str += "-"  # Out of range
+                    char_to_draw = "-"
+                    color = curses.color_pair(5)  # White for out of range
+                
+                if x_pos + 1 < right_half_x:
+                    try:
+                        stdscr.addstr(y_offset, x_pos, char_to_draw, color)
+                        x_pos += 1
+                    except curses.error:
+                        pass
             
-            # Show as compact string with brackets
-            bank_str = "[" + cell_str + "]"
-            row += bank_str + " "
+            # Draw closing bracket and space in default color
+            if x_pos + 2 < right_half_x:
+                try:
+                    stdscr.addstr(y_offset, x_pos, "] ", curses.color_pair(5))
+                    x_pos += 2
+                except curses.error:
+                    pass
         
-        # Determine row color based on alerts
-        row_color = curses.color_pair(4)  # Default green
-        bracket_start = row.find("["); bracket_end = row.find("]")
-        bracket_content = row[bracket_start:bracket_end+1] if bracket_start >= 0 and bracket_end > bracket_start else ""
-        if "H" in bracket_content or "L" in bracket_content:
-            row_color = curses.color_pair(2)  # Red for alerts
-        
-        if len(row) < right_half_x:
-            try:
-                stdscr.addstr(y_offset, 0, row, row_color)
-            except curses.error:
-                pass
         y_offset += 1
     
     # Color-coded legend at bottom

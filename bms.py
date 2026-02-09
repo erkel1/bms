@@ -2625,13 +2625,16 @@ def draw_tui(stdscr, voltages, calibrated_temps, raw_temps, offsets, bank_stats,
             stdscr.addstr(y_offset, 48, "=cool<-2  ", curses.color_pair(7))
             # l = cold (blue)
             stdscr.addstr(y_offset, 58, "l", curses.color_pair(7))
-            stdscr.addstr(y_offset, 59, "=cold<-3  ", curses.color_pair(7))
+            stdscr.addstr(y_offset, 59, "=cold  ", curses.color_pair(7))
+            # L = very cold (magenta bold)
+            stdscr.addstr(y_offset, 67, "L", curses.color_pair(8) | curses.A_BOLD)
+            stdscr.addstr(y_offset, 68, "=v.cold  ", curses.color_pair(8))
             # ? = invalid (magenta)
-            stdscr.addstr(y_offset, 69, "?", curses.color_pair(8))
-            stdscr.addstr(y_offset, 70, "=invalid  ", curses.color_pair(8))
+            stdscr.addstr(y_offset, 78, "?", curses.color_pair(8))
+            stdscr.addstr(y_offset, 79, "=invalid  ", curses.color_pair(8))
             # - = missing (white)
-            stdscr.addstr(y_offset, 80, "-", curses.color_pair(5))
-            stdscr.addstr(y_offset, 81, "=missing", curses.color_pair(5))
+            stdscr.addstr(y_offset, 89, "-", curses.color_pair(5))
+            stdscr.addstr(y_offset, 90, "=missing", curses.color_pair(5))
         except curses.error:
             pass
     y_offset += 1

@@ -521,6 +521,50 @@ def get_battery_and_local_ch(ch, num_series_banks=None, sensors_per_bank=None):
     # Return as a pair (tuple).
     return bat_id, local_ch
 
+def test_network_connectivity(ip, port, timeout=2):
+    """
+    Test network connectivity to a Modbus device.
+    
+    Args:
+        ip: IP address to check
+        port: TCP port to check
+        timeout: Connection timeout in seconds
+    
+    Returns:
+        tuple: (reachable: bool, error_type: str or None)
+               reachable=True means network is up
+               reachable=False with error_type indicates the type of failure
+    """
+    import socket
+    
+    # First, try TCP connection (faster than ping)
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        s.settimeout(timeout)
+        s.connect((ip, port))
+        s.close()
+        return True, None  # Network is up
+    except socket.error as e:
+        error_code = e.args[0] if e.args else None
+        error_str = str(e)
+        
+        if error_code == 111:  # Connection refused
+            return False, "connection_refused"
+        elif error_code == 113:  # No route to host
+            return False, "no_route"
+        elif error_code == 110:  # Timed out
+            return False, "timeout"
+        elif "Connection refused" in error_str:
+            return False, "connection_refused"
+        elif "No route to host" in error_str or "Network is unreachable" in error_str:
+            return False, "no_route"
+        elif "Timed out" in error_str:
+            return False, "timeout"
+        else:
+            # Other socket error - log the actual error
+            logging.warning(f"Socket error checking {ip}:{port}: {error_str} (code={error_code})")
+            return False, f"socket_error_{error_code}"
+
 def modbus_crc(data):
     """
     Calculate a checksum (CRC) to ensure data integrity for Modbus communication.
@@ -629,8 +673,23 @@ def read_ntc_sensors(ip, modbus_port, query_delay, num_channels, scaling_factor,
     expected_response_length = 3 + expected_data_length + 2
     
     network_retry_count = 0
+    attempt = 0
     
-    for attempt in range(max_retries):
+    while attempt < 10:  # Retry up to 10 times
+        # First, check network connectivity
+        network_ok, network_error = test_network_connectivity(effective_ip, effective_port)
+        if not network_ok:
+            network_retry_count += 1
+            update_comm_stats(slave_addr, False, error_type=ModbusError.CONNECTION_REFUSED)
+            if network_retry_count < 10:
+                logging.warning(f"Network check failed for slave {slave_addr}: {network_error}, retry {network_retry_count}/10")
+                time.sleep(5)  # Longer delay for network issues
+                attempt += 1
+                continue
+            else:
+                logging.error(f"Network still down after 10 retries for slave {slave_addr}")
+                return f"Error: Network unreachable for slave {slave_addr}"
+        
         try:
             logging.debug(f"Temp read attempt {attempt+1} for slave {slave_addr}: {effective_ip}:{effective_port}")
             
@@ -712,52 +771,36 @@ def read_ntc_sensors(ip, modbus_port, query_delay, num_channels, scaling_factor,
             
             logging.info(f"Temp read successful for slave {slave_addr}: {len(raw_temperatures)} values")
             update_comm_stats(slave_addr, True)
+            update_temp_cache(slave_addr, raw_temperatures)
             return raw_temperatures
             
         except socket.error as e:
             logging.warning(f"Temp read attempt {attempt+1} for slave {slave_addr} failed: {str(e)}")
             time.sleep(3)
             
-            if test_modbus_connectivity(ip, modbus_port):
-                logging.warning(f"Network up, treating as device error for slave {slave_addr}")
-                if attempt < max_retries - 1:
-                    time.sleep((retry_backoff_base ** attempt) + query_delay)
-                else:
-                    logging.error(f"Temp read failed after {max_retries} attempts for slave {slave_addr}")
-                    update_comm_stats(slave_addr, False, error_type=ModbusError.UNKNOWN)
-                    return f"Error: Failed after {max_retries} attempts for slave {slave_addr}"
+            # Socket error even after network check - might be Modbus protocol issue
+            attempt += 1
+            if attempt < 10:
+                time.sleep(1)  # Shorter delay for protocol issues
+                continue
             else:
-                network_retry_count += 1
-                update_comm_stats(slave_addr, False, error_type=ModbusError.CONNECTION_REFUSED)
-                if network_retry_count < 5:
-                    logging.warning(f"Network down, retrying ({network_retry_count}/5) for slave {slave_addr}")
-                    continue
-                else:
-                    logging.error(f"Network down after 5 retries for slave {slave_addr}")
-                    update_comm_stats(slave_addr, False, error_type=ModbusError.CONNECTION_REFUSED)
-                    return f"Error: Network unreachable for slave {slave_addr}"
+                logging.error(f"Temp read failed after {attempt} attempts for slave {slave_addr}")
+                update_comm_stats(slave_addr, False, error_type=ModbusError.UNKNOWN)
+                return f"Error: Failed after {attempt} attempts for slave {slave_addr}"
                     
         except ValueError as e:
             logging.warning(f"Temp read validation failed for slave {slave_addr}: {str(e)}")
             time.sleep(3)
             
-            if test_modbus_connectivity(ip, modbus_port):
-                if attempt < max_retries - 1:
-                    time.sleep((retry_backoff_base ** attempt) + query_delay)
-                else:
-                    logging.error(f"Temp read failed after {max_retries} attempts for slave {slave_addr}")
-                    update_comm_stats(slave_addr, False, error_type=ModbusError.UNKNOWN)
-                    return f"Error: Failed after {max_retries} attempts for slave {slave_addr}"
+            # Validation error - might be Modbus protocol issue
+            attempt += 1
+            if attempt < 10:
+                time.sleep(1)  # Shorter delay for protocol issues
+                continue
             else:
-                network_retry_count += 1
-                update_comm_stats(slave_addr, False, error_type=ModbusError.CONNECTION_REFUSED)
-                if network_retry_count < 5:
-                    logging.warning(f"Network down, retrying ({network_retry_count}/5) for slave {slave_addr}")
-                    continue
-                else:
-                    logging.error(f"Network down after 5 retries for slave {slave_addr}")
-                    update_comm_stats(slave_addr, False, error_type=ModbusError.CONNECTION_REFUSED)
-                    return f"Error: Network unreachable for slave {slave_addr}"
+                logging.error(f"Temp read failed after {attempt} attempts for slave {slave_addr}")
+                update_comm_stats(slave_addr, False, error_type=ModbusError.UNKNOWN)
+                return f"Error: Failed after {attempt} attempts for slave {slave_addr}"
                     
         except Exception as e:
             logging.warning(f"Temp read unexpected error for slave {slave_addr}: {str(e)}")
@@ -1110,7 +1153,7 @@ def detect_hardware(settings):
     for addr in settings['modbus_slave_addresses']:
         try:
             # Try a minimal read (1 channel) to test connectivity.
-            test_result = read_ntc_sensors(settings['ip'], settings['modbus_port'], settings['query_delay'], 1, settings['scaling_factor'], 1, 1, slave_addr=addr, slave_ips=settings.get('modbus_slave_ips', []))
+            test_result = read_ntc_sensors(settings['ip'], settings['modbus_port'], settings['query_delay'], 1, settings['scaling_factor'], 1, 1, slave_addr=addr, slave_ips=settings.get('modbus_slave_ips', []), slave_addresses=settings.get('modbus_slave_addresses', []))
             if isinstance(test_result, str):
                 # If error string, log warning.
                 logging.warning(f"Modbus slave {addr} not accessible: {test_result}")
@@ -1218,6 +1261,9 @@ def setup_hardware(settings):
         logging.error(f"RRD file operation failed: {e}")
     # Log completion.
     logging.info("Hardware setup complete, including RRD initialization.")
+    # Give Modbus slaves time to initialize before detection
+    logging.info("Waiting 10 seconds for Modbus slaves to initialize...")
+    time.sleep(10)
     # Run detection after setup.
     detect_hardware(settings)
 
@@ -2910,7 +2956,7 @@ def startup_self_test(settings, stdscr, data_dir):
             logging.info(f"Testing Modbus slave {addr} on port {port_for_slave} (config: {settings['modbus_slave_ports']})")
             logging.debug(f"Testing Modbus slave {addr} connectivity to {settings['ip']}:{port_for_slave} with num_channels=1")
             try:
-                test_query = read_ntc_sensors(settings['ip'], port_for_slave, settings['query_delay'], 1, settings['scaling_factor'], 1, 1, slave_addr=addr, slave_ips=settings.get('modbus_slave_ips', []))
+                test_query = read_ntc_sensors(settings['ip'], port_for_slave, settings['query_delay'], 1, settings['scaling_factor'], 1, 1, slave_addr=addr, slave_ips=settings.get('modbus_slave_ips', []), slave_addresses=settings.get('modbus_slave_addresses', []))
                 if isinstance(test_query, str) and "Error" in test_query:
                     raise ValueError(test_query)
                 logging.debug(f"Modbus test successful for slave {addr}: Received {len(test_query)} values: {test_query}")
@@ -2952,7 +2998,8 @@ def startup_self_test(settings, stdscr, data_dir):
             initial_temps = read_ntc_sensors(settings['ip'], port_for_slave, settings['query_delay'],
                                               settings['sensors_per_battery'], settings['scaling_factor'],
                                               settings['max_retries'], settings['retry_backoff_base'], slave_addr=addr,
-                                              slave_ips=settings.get('modbus_slave_ips', []))
+                                              slave_ips=settings.get('modbus_slave_ips', []),
+                                              slave_addresses=settings.get('modbus_slave_addresses', []))
             if isinstance(initial_temps, str):
                 alert = f"Initial temp read failure for slave {addr}: {initial_temps}"
                 alerts.append(alert)
@@ -3759,7 +3806,7 @@ def main(stdscr):
     # Init web_data.
     web_data['voltages'] = [0.0] * NUM_BANKS
     web_data['temperatures'] = [None] * total_channels
-    web_data['bank_summaries'] = [{'median': 0.0, 'min': 0.0, 'max': 0.0, 'invalid': 0}] * NUM_BANKS
+    web_data['bank_summaries'] = [{'median': 0.0, 'min': 0.0, 'max': 0.0, 'invalid': 0} for _ in range(NUM_BANKS)]
     # Build indices.
     for bat in range(number_parallel):
         base = bat * sensors_per_battery
@@ -3773,6 +3820,9 @@ def main(stdscr):
     init_comm_stats(slave_addresses)
     # Web.
     start_web_server(settings)
+    # Give Modbus slaves time to initialize before self-test
+    logging.info("Waiting 10 seconds for Modbus slaves to initialize...")
+    time.sleep(10)
     # Self-test.
     startup_self_test(settings, stdscr, data_dir)
     # Signal handler.

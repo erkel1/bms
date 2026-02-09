@@ -2800,8 +2800,8 @@ def setup_watchdog(timeout=15):
         # Detect Pi model from /proc.
         model = "Unknown"
         if os.path.exists('/proc/device-tree/model'):
-            with open('/proc/device-tree/model', 'r') as f:
-                model = f.read().strip().lower()
+            with open('/proc/device-tree/model', 'rb') as f:
+                model = f.read().replace(b'\x00', b'').decode('utf-8', errors='ignore').strip().lower()
         # Choose module: Older Pi vs Pi5+.
         logging.info(f"Detected Raspberry Pi model: {model}")
         if 'raspberry pi' in model and not 'raspberry pi 5' in model:
@@ -2810,7 +2810,7 @@ def setup_watchdog(timeout=15):
             module = 'rp1-wdt'
             logging.info("Assuming rp1-wdt for Pi 5 or newer model")
         # Load module.
-        os.system(f'sudo modprobe {module}')
+        os.system(f'modprobe {module}')
         logging.info(f"Loaded watchdog module: {module}")
         # Wait for load.
         time.sleep(1)
@@ -2823,11 +2823,12 @@ def setup_watchdog(timeout=15):
         logging.debug(f"Opened watchdog device: {WATCHDOG_DEV}")
         # Set timeout via ioctl (magic 'W' + 6, pack timeout).
         try:
-            magic = ord('W') << 8 | 0x06
-            fcntl.ioctl(watchdog_fd, magic, struct.pack("I", timeout))
-            logging.info(f"Watchdog set with timeout {timeout}s")
+            # WDIOC_SETTIMEOUT = _IOWR('W', 6, int) = 0xc0045706
+            WDIOC_SETTIMEOUT = 0xc0045706
+            fcntl.ioctl(watchdog_fd, WDIOC_SETTIMEOUT, struct.pack("I", timeout))
+            logging.info(f"Watchdog timeout set to {timeout}s")
         except IOError as e:
-            logging.warning(f"Failed to set watchdog timeout: {e}. Using default.")
+            logging.warning(f"Failed to set watchdog timeout: {e}. Using kernel default.")
         # Log init.
         logging.debug("Watchdog initialized")
         return True
@@ -2835,11 +2836,11 @@ def setup_watchdog(timeout=15):
         logging.error(f"Failed to setup watchdog: {e}.")
         return False
 
-def watchdog_pet_thread(pet_interval=5, hang_threshold=12):
+def watchdog_pet_thread(pet_interval=5, hang_threshold=60):
     """
     Dedicated thread to pet (reset) the watchdog every pet_interval seconds, but only if main thread is alive.
     Checks alive_timestamp; if diff > hang_threshold, assumes hang and stops petting (allows reset).
-    Increased hang_threshold to 12s to prevent false hang detection during normal 10s poll_interval sleep, ensuring watchdog (15s timeout) is petted reliably.
+    Increased hang_threshold to 60s to prevent false hang detection during 8-slave Modbus reads (can take 20-40s), ensuring watchdog (15s timeout) is petted reliably.
     Non-programmer: Like a watchdog dog that you feed treats regularly; if you stop moving (hang), it barks and resets the system.
     
     Args:
@@ -3900,6 +3901,8 @@ def main(stdscr):
         all_raw_temps = [] # Will hold all raw temperature readings from all sensors
         # Read temps per slave with delay between each slave for reliable RS485 communication.
         for i, addr in enumerate(slave_addresses):
+            # Update alive timestamp for watchdog during temp reads
+            alive_timestamp = time.time()
             # Add delay between slaves (except before first slave)
             if i > 0:
                 inter_delay = settings.get('inter_slave_delay', 0.5)

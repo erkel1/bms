@@ -381,6 +381,7 @@ run_count = 0 # Counts how many times the main loop has run - cycle counter.
 startup_offsets = None # Temperature calibration offsets from startup - adjustment numbers.
 startup_median = None # Median temperature at startup - average at start.
 startup_set = False # Indicates if temperature calibration is set - calibration flag.
+_calibration_cache = None  # Cache for perform_calibration to avoid repeated disk reads
 alert_states = {} # Tracks alerts for each temperature channel - alert memory.
 balancing_active = False # Indicates if balancing is currently happening - balancing flag.
 startup_failed = False # Indicates if startup tests failed - test fail flag.
@@ -538,13 +539,18 @@ def test_network_connectivity(ip, port, timeout=2):
     import socket
     
     # First, try TCP connection (faster than ping)
+    s = None
     try:
         s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         s.settimeout(timeout)
         s.connect((ip, port))
         s.close()
+        s = None
         return True, None  # Network is up
     except socket.error as e:
+        if s:
+            try: s.close()
+            except: pass
         error_code = e.args[0] if e.args else None
         error_str = str(e)
         
@@ -690,6 +696,7 @@ def read_ntc_sensors(ip, modbus_port, query_delay, num_channels, scaling_factor,
                 logging.error(f"Network still down after 10 retries for slave {slave_addr}")
                 return f"Error: Network unreachable for slave {slave_addr}"
         
+        s = None  # Initialize socket for cleanup in except blocks
         try:
             logging.debug(f"Temp read attempt {attempt+1} for slave {slave_addr}: {effective_ip}:{effective_port}")
             
@@ -775,6 +782,9 @@ def read_ntc_sensors(ip, modbus_port, query_delay, num_channels, scaling_factor,
             return raw_temperatures
             
         except socket.error as e:
+            if s:
+                try: s.close()
+                except: pass
             logging.warning(f"Temp read attempt {attempt+1} for slave {slave_addr} failed: {str(e)}")
             time.sleep(3)
             
@@ -789,6 +799,9 @@ def read_ntc_sensors(ip, modbus_port, query_delay, num_channels, scaling_factor,
                 return f"Error: Failed after {attempt} attempts for slave {slave_addr}"
                     
         except ValueError as e:
+            if s:
+                try: s.close()
+                except: pass
             logging.warning(f"Temp read validation failed for slave {slave_addr}: {str(e)}")
             time.sleep(3)
             
@@ -803,7 +816,18 @@ def read_ntc_sensors(ip, modbus_port, query_delay, num_channels, scaling_factor,
                 return f"Error: Failed after {attempt} attempts for slave {slave_addr}"
                     
         except Exception as e:
+            if s:
+                try: s.close()
+                except: pass
             logging.warning(f"Temp read unexpected error for slave {slave_addr}: {str(e)}")
+            attempt += 1
+            if attempt < 10:
+                time.sleep(1)
+                continue
+            else:
+                logging.error(f"Temp read failed after {attempt} attempts for slave {slave_addr}: {str(e)}")
+                update_comm_stats(slave_addr, False, error_type=ModbusError.UNKNOWN)
+                return f"Error: Failed after {attempt} attempts for slave {slave_addr}"
     
     # All retries exhausted - use cached values with enhanced error handling
     logging.warning(f"All retries exhausted for slave {slave_addr}, using cached values")
@@ -1017,7 +1041,8 @@ def load_config(data_dir):
     startup_settings = {
         'test_balance_duration': config_parser.getint('Startup', 'test_balance_duration', fallback=15),  # Test balance time s.
         'min_voltage_delta': config_parser.getfloat('Startup', 'min_voltage_delta', fallback=0.01),  # Min change to verify V.
-        'test_read_interval': config_parser.getfloat('Startup', 'test_read_interval', fallback=2.0)  # Read freq during test s.
+        'test_read_interval': config_parser.getfloat('Startup', 'test_read_interval', fallback=2.0),  # Read freq during test s.
+        'min_balance_source_voltage': config_parser.getfloat('Startup', 'min_balance_source_voltage', fallback=17.0)  # Min source V for DC-DC.
     }
     # Web server settings.
     web_settings = {
@@ -1399,6 +1424,12 @@ def perform_calibration(settings, raw_temps, data_dir):
     Returns:
         tuple: (startup_median, startup_offsets)
     """
+    global _calibration_cache
+    
+    # Return cached calibration if available (avoid repeated disk reads)
+    if _calibration_cache is not None:
+        return _calibration_cache
+    
     offsets_file = os.path.join(data_dir, 'offsets.txt')
     
     # Check if offsets already exist
@@ -1407,6 +1438,7 @@ def perform_calibration(settings, raw_temps, data_dir):
         startup_median, startup_offsets = load_offsets(settings['total_channels'], data_dir)
         if startup_offsets is not None:
             logging.info(f"Loaded existing calibration: Median={startup_median:.1f}C (offsets.txt)")
+            _calibration_cache = (startup_median, startup_offsets)
             return startup_median, startup_offsets
     
     # First time calibration (commissioning) or forced recalibration
@@ -1422,14 +1454,9 @@ def perform_calibration(settings, raw_temps, data_dir):
     
     # Save to file
     save_offsets(startup_median, startup_offsets, data_dir)
+    logging.info(f"Calibration complete: Median={startup_median:.1f}C (offsets.txt saved)")
     
-    if os.path.exists(offsets_file):
-        # Was a recalibration (file existed before)
-        logging.warning(f"Recalibration complete: Median={startup_median:.1f}C (offsets.txt overwritten)")
-    else:
-        # First time calibration
-        logging.info(f"First calibration complete: Median={startup_median:.1f}C (offsets.txt created)")
-    
+    _calibration_cache = (startup_median, startup_offsets)
     return startup_median, startup_offsets
 
 
@@ -2548,7 +2575,7 @@ def draw_tui(stdscr, voltages, calibrated_temps, raw_temps, offsets, bank_stats,
             
             # Draw each cell with its individual color
             for sensor_pos in range(sensors_per_bank):
-                global_idx = (bank_id * sensors_per_bank) + ((bat_id - 1) * sensors_per_bank) + sensor_pos
+                global_idx = ((bat_id - 1) * NUM_BANKS * sensors_per_bank) + (bank_id * sensors_per_bank) + sensor_pos
                 char_to_draw = "?"
                 color = curses.color_pair(5)  # Default white
                 
@@ -2894,6 +2921,8 @@ def startup_self_test(settings, stdscr, data_dir):
     while retries < max_retries:
         # Log attempt.
         logging.info(f"Starting self-test attempt {retries + 1}")
+        # Reset balancer_failed at start of each attempt so previous failures dont persist
+        balancer_failed = False
         # Alerts for this run.
         alerts = []
         # Clear screen.
@@ -3750,20 +3779,25 @@ def start_web_server(settings):
         balancing_active = True
         logging.info(f"Balancing initiated via web API from Bank {high_bank} to Bank {low_bank}")
         return jsonify({'success': True, 'message': f'Balancing initiated from Bank {high_bank} to Bank {low_bank}'})
-    # Before each request: Auth and CORS.
+    # Before each request: Auth check and CORS preflight.
     @app.before_request
     def before_request():
         if settings['auth_required']:
             auth = request.authorization
             if not auth or not (auth.username == settings['username'] and auth.password == settings['password']):
                 return make_response('Unauthorized', 401, {'WWW-Authenticate': 'Basic realm="BMS"'})
-        if settings['cors_enabled']:
+        if settings['cors_enabled'] and request.method == 'OPTIONS':
             response = make_response()
             response.headers['Access-Control-Allow-Origin'] = settings['cors_origins']
-            if request.method == 'OPTIONS':
-                response.headers['Access-Control-Allow-Methods'] = 'GET, POST, OPTIONS'
-                response.headers['Access-Control-Allow-Headers'] = 'Content-Type, Authorization'
-                return response
+            response.headers['Access-Control-Allow-Methods'] = 'GET, POST, OPTIONS'
+            response.headers['Access-Control-Allow-Headers'] = 'Content-Type, Authorization'
+            return response
+    # After each request: Add CORS headers to all responses.
+    @app.after_request
+    def after_request(response):
+        if settings['cors_enabled']:
+            response.headers['Access-Control-Allow-Origin'] = settings['cors_origins']
+        return response
     # Function to run app.
     def run_app():
         logging.info("Starting Flask app...")
@@ -3956,6 +3990,10 @@ def main(stdscr):
         values = f"{timestamp}:{overall_median}:{':'.join(map(str, battery_voltages))}"
         subprocess.call(['rrdtool', 'update', RRD_FILE, values])
         logging.debug(f"RRD updated with: {values}")
+        # Reset balancing_active if balancer_failed prevents us from processing it
+        if balancer_failed and balancing_active:
+            logging.warning("Resetting balancing_active flag - balancer_failed prevents balancing")
+            balancing_active = False
         # Balance decision.
         if len(battery_voltages) == NUM_BANKS and not balancer_failed:
             max_v = max(battery_voltages) # Find highest voltage bank
@@ -3964,8 +4002,14 @@ def main(stdscr):
             low_b = battery_voltages.index(min_v) + 1 # Bank number with lowest voltage
             current_time = time.time()
             any_low_temp = any(t is not None and t < 10 for t in calibrated_temps)
+            min_src_v = settings.get('min_balance_source_voltage', 17.0)
+            # Guard: Dont balance a bank to itself
+            if high_b == low_b:
+                logging.debug(f"Skipping balance: source and dest are same bank ({high_b})")
+            elif max_v < min_src_v:
+                logging.warning(f"Skipping balance: source {max_v:.2f}V < min {min_src_v:.1f}V for DC-DC")
             # Condition.
-            if balancing_active or (not alert_needed and (any_low_temp or max_v - min_v > settings['VoltageDifferenceToBalance']) and min_v > 0 and current_time - last_balance_time > settings['BalanceRestPeriodSeconds']):
+            elif balancing_active or (not alert_needed and (any_low_temp or max_v - min_v > settings['VoltageDifferenceToBalance']) and min_v > 0 and current_time - last_balance_time > settings['BalanceRestPeriodSeconds']):
                 is_heating = any_low_temp
                 balance_battery_voltages(stdscr, high_b, low_b, settings, temps_alerts, is_heating=is_heating) # Transfer charge
                 balancing_active = False

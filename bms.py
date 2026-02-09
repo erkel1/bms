@@ -2647,8 +2647,7 @@ def draw_tui(stdscr, voltages, calibrated_temps, raw_temps, offsets, bank_stats,
             except curses.error:
                 pass
     # Startup median.
-    # Startup median.
-    # Startup median.
+    y_offset += 1
     med_str = f"{startup_median:.1f}°C" if startup_median else "N/A"
     if y_offset < height:
         try:

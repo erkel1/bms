@@ -2712,6 +2712,7 @@ def draw_tui(stdscr, voltages, calibrated_temps, raw_temps, offsets, bank_stats,
         f"Low Voltage Threshold per Bank: {settings['LowVoltageThresholdPerBattery']}V",
         f"High Voltage Threshold per Bank: {settings['HighVoltageThresholdPerBattery']}V",
         f"Voltage Difference to Balance: {settings['VoltageDifferenceToBalance']}V",
+        f"Min Balance Source Voltage: {settings.get('min_balance_source_voltage', 17.0)}V",
         f"Balance Duration: {settings['BalanceDurationSeconds']} seconds",
         f"Balance Rest Period: {settings['BalanceRestPeriodSeconds']} seconds"
     ]

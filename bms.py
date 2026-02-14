@@ -2109,107 +2109,110 @@ def balance_battery_voltages(stdscr, high, low, settings, temps_alerts, is_heati
     set_relay_connection(high, low, settings)
     # Turn on converter.
     control_dcdc_converter(True, settings)
-    # Start timer.
-    balance_start_time = time.time()
-    # Initial trends.
-    voltage_high = initial_high_v if initial_high_v is not None else 0.0
-    voltage_low = initial_low_v if initial_low_v is not None else 0.0
-    # Animation for progress.
-    animation_frames = ['|', '/', '-', '\\']
-    frame_index = 0
-    # Screen dimensions for display.
-    height, width = stdscr.getmaxyx()
-    right_half_x = width // 2
-    progress_y = 1
-    high_trend = [voltage_high]
-    low_trend = [voltage_low]
-    # Read interval during balance (reuse startup).
-    read_interval = settings['test_read_interval'] # Reuse from startup
-    last_read = time.time()
-    # Loop for duration.
-    while time.time() - balance_start_time < settings['BalanceDurationSeconds']:
-        # Update timestamp.
-        alive_timestamp = time.time()
-        # Progress calc.
-        elapsed = time.time() - balance_start_time
-        progress = min(1.0, elapsed / settings['BalanceDurationSeconds'])
-        # Read voltages periodically.
-        if time.time() - last_read >= read_interval:
-            new_high, _, _ = read_voltage_with_retry(high, settings)
-            new_low, _, _ = read_voltage_with_retry(low, settings)
-            voltage_high = new_high if new_high is not None else voltage_high
-            voltage_low = new_low if new_low is not None else voltage_low
-            high_trend.append(voltage_high)
-            low_trend.append(voltage_low)
-            last_read = time.time()
-        # Progress bar.
-        bar_length = 20
-        filled = int(bar_length * progress)
-        bar = '=' * filled + ' ' * (bar_length - filled)
-        # Display on TUI if space.
-        if progress_y < height and right_half_x + 50 < width:
+    try:
+        # Start timer.
+        balance_start_time = time.time()
+        # Initial trends.
+        voltage_high = initial_high_v if initial_high_v is not None else 0.0
+        voltage_low = initial_low_v if initial_low_v is not None else 0.0
+        # Animation for progress.
+        animation_frames = ['|', '/', '-', '\\']
+        frame_index = 0
+        # Screen dimensions for display.
+        height, width = stdscr.getmaxyx()
+        right_half_x = width // 2
+        progress_y = 1
+        high_trend = [voltage_high]
+        low_trend = [voltage_low]
+        # Read interval during balance (reuse startup).
+        read_interval = settings['test_read_interval'] # Reuse from startup
+        last_read = time.time()
+        # Loop for duration.
+        while time.time() - balance_start_time < settings['BalanceDurationSeconds']:
+            # Update timestamp.
+            alive_timestamp = time.time()
+            # Progress calc.
+            elapsed = time.time() - balance_start_time
+            progress = min(1.0, elapsed / settings['BalanceDurationSeconds'])
+            # Read voltages periodically.
+            if time.time() - last_read >= read_interval:
+                new_high, _, _ = read_voltage_with_retry(high, settings)
+                new_low, _, _ = read_voltage_with_retry(low, settings)
+                voltage_high = new_high if new_high is not None else voltage_high
+                voltage_low = new_low if new_low is not None else voltage_low
+                high_trend.append(voltage_high)
+                low_trend.append(voltage_low)
+                last_read = time.time()
+            # Progress bar.
+            bar_length = 20
+            filled = int(bar_length * progress)
+            bar = '=' * filled + ' ' * (bar_length - filled)
+            # Display on TUI if space.
+            if progress_y < height and right_half_x + 50 < width:
+                try:
+                    stdscr.addstr(progress_y, right_half_x, f"{mode} Balancing Bank {high} ({voltage_high:.2f}V) -> Bank {low} ({voltage_low:.2f}V)... [{animation_frames[frame_index % 4]}]", curses.color_pair(6))
+                except curses.error:
+                    logging.warning("addstr error for balancing status.")
+                try:
+                    stdscr.addstr(progress_y + 1, right_half_x, f"Progress: [{bar}] {int(progress * 100)}%", curses.color_pair(6))
+                except curses.error:
+                    logging.warning("addstr error for balancing progress bar.")
+            else:
+                logging.warning("Skipping balancing progress display - out of bounds.")
+            stdscr.refresh()
+            # Log progress.
+            logging.debug(f"Balancing progress: {progress * 100:.2f}%, High: {voltage_high:.2f}V, Low: {voltage_low:.2f}V")
+            frame_index += 1
+            # Short sleep for animation.
+            time.sleep(0.01)
+        # Final reads.
+        final_high_v, _, _ = read_voltage_with_retry(high, settings)
+        final_low_v, _, _ = read_voltage_with_retry(low, settings)
+        final_high_v = final_high_v if final_high_v is not None else voltage_high
+        final_low_v = final_low_v if final_low_v is not None else voltage_low
+        high_trend.append(final_high_v)
+        low_trend.append(final_low_v)
+    
+        # Use module-level weighted_average function for both displayed values and verification
+        # This smooths out DC-DC converter pulsing/inrush current variations
+        # Weighting: more recent readings have higher weight (exponential decay)
+        # This ensures the average reflects the end-of-balance state more than the start
+        avg_high_v = weighted_average(high_trend)
+        avg_low_v = weighted_average(low_trend)
+    
+        # Fallback to final reading if averaging fails
+        avg_high_v = avg_high_v if avg_high_v is not None else final_high_v
+        avg_low_v = avg_low_v if avg_low_v is not None else final_low_v
+    
+        # Log both discrete and averaged values for comparison
+        logging.info(f"Balance final readings: Discrete High={final_high_v:.3f}V, Low={final_low_v:.3f}V | "
+                     f"Averaged High={avg_high_v:.3f}V, Low={avg_low_v:.3f}V | "
+                     f"Trend points: High={len(high_trend)}, Low={len(low_trend)}")
+    
+        # Display averaged values on console
+        if progress_y + 2 < height and right_half_x + 60 < width:
             try:
-                stdscr.addstr(progress_y, right_half_x, f"{mode} Balancing Bank {high} ({voltage_high:.2f}V) -> Bank {low} ({voltage_low:.2f}V)... [{animation_frames[frame_index % 4]}]", curses.color_pair(6))
+                stdscr.addstr(progress_y + 2, right_half_x, f"Averaged: High={avg_high_v:.3f}V, Low={avg_low_v:.3f}V", curses.color_pair(4))
             except curses.error:
-                logging.warning("addstr error for balancing status.")
-            try:
-                stdscr.addstr(progress_y + 1, right_half_x, f"Progress: [{bar}] {int(progress * 100)}%", curses.color_pair(6))
-            except curses.error:
-                logging.warning("addstr error for balancing progress bar.")
-        else:
-            logging.warning("Skipping balancing progress display - out of bounds.")
-        stdscr.refresh()
-        # Log progress.
-        logging.debug(f"Balancing progress: {progress * 100:.2f}%, High: {voltage_high:.2f}V, Low: {voltage_low:.2f}V")
-        frame_index += 1
-        # Short sleep for animation.
-        time.sleep(0.01)
-    # Final reads.
-    final_high_v, _, _ = read_voltage_with_retry(high, settings)
-    final_low_v, _, _ = read_voltage_with_retry(low, settings)
-    final_high_v = final_high_v if final_high_v is not None else voltage_high
-    final_low_v = final_low_v if final_low_v is not None else voltage_low
-    high_trend.append(final_high_v)
-    low_trend.append(final_low_v)
-    
-    # Use module-level weighted_average function for both displayed values and verification
-    # This smooths out DC-DC converter pulsing/inrush current variations
-    # Weighting: more recent readings have higher weight (exponential decay)
-    # This ensures the average reflects the end-of-balance state more than the start
-    avg_high_v = weighted_average(high_trend)
-    avg_low_v = weighted_average(low_trend)
-    
-    # Fallback to final reading if averaging fails
-    avg_high_v = avg_high_v if avg_high_v is not None else final_high_v
-    avg_low_v = avg_low_v if avg_low_v is not None else final_low_v
-    
-    # Log both discrete and averaged values for comparison
-    logging.info(f"Balance final readings: Discrete High={final_high_v:.3f}V, Low={final_low_v:.3f}V | "
-                 f"Averaged High={avg_high_v:.3f}V, Low={avg_low_v:.3f}V | "
-                 f"Trend points: High={len(high_trend)}, Low={len(low_trend)}")
-    
-    # Display averaged values on console
-    if progress_y + 2 < height and right_half_x + 60 < width:
-        try:
-            stdscr.addstr(progress_y + 2, right_half_x, f"Averaged: High={avg_high_v:.3f}V, Low={avg_low_v:.3f}V", curses.color_pair(4))
-        except curses.error:
-            logging.warning("addstr error for averaged values display.")
-    # Update web_data with averaged readings BEFORE turning off converter
-    # This ensures the displayed voltages reflect the balanced state, not settling values
-    with data_lock:
-        web_data['voltages'][high - 1] = avg_high_v
-        web_data['voltages'][low - 1] = avg_low_v
-    # Turn off converter.
-    control_dcdc_converter(False, settings)
-    logging.info("Turning off DC-DC converter.")
-    # Reset relays.
-    set_relay_connection(0, 0, settings)
-    logging.info("Resetting relay connections to default state.")
-    # Reset flags.
-    balancing_active = False
-    with data_lock:
-        web_data['balancing'] = False
-    last_balance_time = time.time()
+                logging.warning("addstr error for averaged values display.")
+        # Update web_data with averaged readings BEFORE turning off converter
+        # This ensures the displayed voltages reflect the balanced state, not settling values
+        with data_lock:
+            web_data['voltages'][high - 1] = avg_high_v
+            web_data['voltages'][low - 1] = avg_low_v
+        # Turn off converter.
+    finally:
+        # Turn off converter.
+        control_dcdc_converter(False, settings)
+        logging.info("Turning off DC-DC converter.")
+        # Reset relays.
+        set_relay_connection(0, 0, settings)
+        logging.info("Resetting relay connections to default state.")
+        # Reset flags.
+        balancing_active = False
+        with data_lock:
+            web_data['balancing'] = False
+        last_balance_time = time.time()
     # Verify: Check changes using AVERAGED readings, not discrete final readings
     # This avoids false failures due to DC-DC converter pulsing at the exact moment of final read
     if len(high_trend) >= 3 and len(low_trend) >= 3:

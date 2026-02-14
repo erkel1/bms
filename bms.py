@@ -681,7 +681,7 @@ def read_ntc_sensors(ip, modbus_port, query_delay, num_channels, scaling_factor,
     network_retry_count = 0
     attempt = 0
     
-    while attempt < 10:  # Retry up to 10 times
+    while attempt < max_retries:  # Use configured max_retries
         # First, check network connectivity
         network_ok, network_error = test_network_connectivity(effective_ip, effective_port)
         if not network_ok:
@@ -1765,7 +1765,7 @@ def read_voltage_with_retry(bank_id, settings):
     # Log start.
     logging.info(f"Starting voltage read for Bank {bank_id}.")
     # Validate bank_id.
-    if bank_id > settings['num_series_banks']:
+    if bank_id > settings['num_series_banks'] or bank_id < 1:
         logging.warning(f"Bank {bank_id} exceeds configured num_series_banks ({settings['num_series_banks']}). Cannot read voltage.")
         return None, [], []
     # Get scaling and calibration.
@@ -2077,6 +2077,10 @@ def balance_battery_voltages(stdscr, high, low, settings, temps_alerts, is_heati
     """
     # Globals for state.
     global balance_start_time, last_balance_time, balancing_active, web_data, alive_timestamp, balancer_failed
+    # Skip if balancer hardware failed.
+    if balancer_failed:
+        logging.warning("Skipping balancing due to balancer_failed flag.")
+        return
     # Skip if temp alerts.
     if temps_alerts:
         logging.warning("Skipping balancing due to temperature anomalies in banks.")
@@ -2192,8 +2196,9 @@ def balance_battery_voltages(stdscr, high, low, settings, temps_alerts, is_heati
             logging.warning("addstr error for averaged values display.")
     # Update web_data with averaged readings BEFORE turning off converter
     # This ensures the displayed voltages reflect the balanced state, not settling values
-    web_data['voltages'][high - 1] = avg_high_v
-    web_data['voltages'][low - 1] = avg_low_v
+    with data_lock:
+        web_data['voltages'][high - 1] = avg_high_v
+        web_data['voltages'][low - 1] = avg_low_v
     # Turn off converter.
     control_dcdc_converter(False, settings)
     logging.info("Turning off DC-DC converter.")
@@ -2202,7 +2207,8 @@ def balance_battery_voltages(stdscr, high, low, settings, temps_alerts, is_heati
     logging.info("Resetting relay connections to default state.")
     # Reset flags.
     balancing_active = False
-    web_data['balancing'] = False
+    with data_lock:
+        web_data['balancing'] = False
     last_balance_time = time.time()
     # Verify: Check changes using AVERAGED readings, not discrete final readings
     # This avoids false failures due to DC-DC converter pulsing at the exact moment of final read

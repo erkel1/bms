@@ -276,6 +276,16 @@ try:
 except ImportError:
     fcntl = None
 import struct # For watchdog struct - data packer.
+# Modbus TCP server for Victron Cerbo GX integration
+try:
+    from pymodbus.server import StartTcpServer
+    from pymodbus.datastore import ModbusServerContext, ModbusDeviceContext, ModbusSequentialDataBlock
+    from pymodbus.pdu.device import ModbusDeviceIdentification
+    MODBUS_SERVER_AVAILABLE = True
+except ImportError:
+    MODBUS_SERVER_AVAILABLE = False
+    print("pymodbus not available - Victron Cerbo GX integration disabled")
+
 config_parser = configparser.ConfigParser(comment_prefixes=(';', '#')) # Object to read INI file - config reader, handles ; and # comments.
 bus = None # I2C bus for communicating with hardware - hardware connection.
 last_email_time = 0 # Tracks when the last email alert was sent - email timer.
@@ -406,6 +416,11 @@ alive_timestamp = 0.0 # Shared timestamp updated by main to indicate aliveness -
 RRD_FILE = 'bms.rrd' # RRD database file for storing time-series data - persistent storage.
 HISTORY_LIMIT = 1440 # Number of historical entries to retain (e.g., ~24 hours at 1min steps) - limit for memory/efficiency.
 data_lock = threading.Lock() # Lock for thread-safe access to web_data
+
+# Modbus TCP Server globals for Victron Cerbo GX integration
+modbus_server_running = False
+modbus_datastore = None
+modbus_registers = {}  # Cache of register values
 
 def check_dependencies():
     """
@@ -1055,6 +1070,13 @@ def load_config(data_dir):
         'cors_enabled': config_parser.getboolean('Web', 'cors_enabled', fallback=False),  # Enable CORS for web.
         'cors_origins': config_parser.get('Web', 'cors_origins', fallback='*')  # Allowed origins.
     }
+    # Modbus TCP server settings for Victron Cerbo GX integration.
+    modbus_server_settings = {
+        'enabled': config_parser.getboolean('ModbusServer', 'enabled', fallback=True),  # Enable Modbus TCP server.
+        'port': config_parser.getint('ModbusServer', 'port', fallback=5020),  # Port for Modbus TCP (5020 to avoid root requirement).
+        'unit_id': config_parser.getint('ModbusServer', 'unit_id', fallback=1),  # Modbus unit/slave ID.
+        'update_interval': config_parser.getfloat('ModbusServer', 'update_interval', fallback=1.0)  # Register update interval.
+    }
     # Relay mapping for balancing pairs (e.g., bank1-bank2 uses certain relay bits).
     relay_mapping = {}
     if config_parser.has_section('RelayMapping'):
@@ -1078,7 +1100,7 @@ def load_config(data_dir):
     }
     return {**temp_settings, **voltage_settings, **general_flags, **i2c_settings,
             **gpio_settings, **email_settings, **adc_settings, **calibration_settings,
-            **startup_settings, **web_settings, 'relay_mapping': relay_mapping, **relay_pins}
+            **startup_settings, **web_settings, **modbus_server_settings, 'relay_mapping': relay_mapping, **relay_pins}
 
 def validate_config(settings):
     """
@@ -3437,6 +3459,313 @@ def startup_self_test(settings, stdscr, data_dir):
     # If here, passed or max retries.
     return []
 
+
+
+# ---------------------------------------------------------------------------
+# Modbus TCP Server Functions for Victron Cerbo GX Integration
+# ---------------------------------------------------------------------------
+
+def create_modbus_datastore(num_banks):
+    """
+    Create Modbus datastore with holding registers for battery data.
+    
+    Register Map (Victron Cerbo GX compatible):
+    Holding Registers (40001+):
+    - 40001-40003: Bank voltages in centivolts (V * 100)
+    - 40004: Total voltage in centivolts
+    - 40005: Average temperature in tenths of degrees (C * 10)
+    - 40006: Max temperature in tenths of degrees
+    - 40007: Min temperature in tenths of degrees
+    - 40008: System status flags (bitfield)
+    - 40009: Alert count
+    - 40010: Balancing status (0=off, 1=active)
+    - 40011-40013: Bank median temperatures in tenths of degrees
+    - 40014-40016: Bank min temperatures
+    - 40017-40019: Bank max temperatures
+    - 40020-40022: Bank invalid sensor counts
+    - 40023: Number of series banks
+    - 40024: Number of parallel batteries
+    - 40025: Total sensor count
+    - 40026: Valid sensor count
+    - 40027-40029: Bank voltage low threshold (centivolts)
+    - 40030-40032: Bank voltage high threshold (centivolts)
+    
+    Args:
+        num_banks (int): Number of battery banks.
+    
+    Returns:
+        ModbusDeviceContext: The datastore for the Modbus server.
+    """
+    if not MODBUS_SERVER_AVAILABLE:
+        return None
+    
+    # Create holding register block (100 registers starting at address 0)
+    # Each register is 16-bit unsigned (0-65535)
+    holding_block = ModbusSequentialDataBlock(0, [0]*100)
+    
+    # Create slave context with the holding register block
+    slave_context = ModbusDeviceContext(
+        di=ModbusSequentialDataBlock(0, [0]*100),  # Discrete inputs
+        co=ModbusSequentialDataBlock(0, [0]*100),  # Coils
+        hr=holding_block,                   # Holding registers
+        ir=ModbusSequentialDataBlock(0, [0]*100)   # Input registers
+    )
+    
+    # Create server context with single slave
+    context = ModbusServerContext(devices=slave_context, single=True)
+    
+    return context
+
+def update_modbus_registers(settings):
+    """
+    Update Modbus holding registers with current battery data.
+    Uses the global web_data for thread-safe access to current values.
+    
+    Args:
+        settings (dict): Configuration settings.
+    """
+    global modbus_registers
+    
+    if not MODBUS_SERVER_AVAILABLE:
+        return
+    
+    with data_lock:
+        voltages = web_data['voltages']
+        temperatures = web_data['temperatures']
+        bank_summaries = web_data['bank_summaries']
+        alerts = web_data['alerts']
+        balancing = web_data['balancing']
+        system_status = web_data['system_status']
+    
+    # Calculate values
+    valid_temps = [t for t in temperatures if t is not None]
+    avg_temp = sum(valid_temps) / len(valid_temps) if valid_temps else 0.0
+    max_temp = max(valid_temps) if valid_temps else 0.0
+    min_temp = min(valid_temps) if valid_temps else 0.0
+    total_voltage = sum(voltages)
+    valid_sensor_count = len(valid_temps)
+    total_sensor_count = len(temperatures)
+    
+    # Build register values
+    registers = {}
+    
+    # Bank voltages (centivolts) - registers 0-2 map to 40001-40003
+    for i, v in enumerate(voltages):
+        registers[i] = int(v * 100) if v is not None else 0
+    
+    # Total voltage (centivolts) - register 3 maps to 40004
+    registers[3] = int(total_voltage * 100)
+    
+    # Average temperature (tenths of degrees) - register 4 maps to 40005
+    registers[4] = int(avg_temp * 10)
+    
+    # Max temperature - register 5 maps to 40006
+    registers[5] = int(max_temp * 10)
+    
+    # Min temperature - register 6 maps to 40007
+    registers[6] = int(min_temp * 10)
+    
+    # System status flags - register 7 maps to 40008
+    # Bit 0: Alert active
+    # Bit 1: Balancing active
+    # Bit 2: Startup failed
+    # Bit 3: Balancer failed
+    status_flags = 0
+    if alerts:
+        status_flags |= 0x01
+    if balancing:
+        status_flags |= 0x02
+    if startup_failed:
+        status_flags |= 0x04
+    if balancer_failed:
+        status_flags |= 0x08
+    registers[7] = status_flags
+    
+    # Alert count - register 8 maps to 40009
+    registers[8] = len(alerts)
+    
+    # Balancing status - register 9 maps to 40010
+    registers[9] = 1 if balancing else 0
+    
+    # Bank median temperatures - registers 10-12 map to 40011-40013
+    for i, summary in enumerate(bank_summaries):
+        registers[10 + i] = int(summary['median'] * 10)
+    
+    # Bank min temperatures - registers 13-15 map to 40014-40016
+    for i, summary in enumerate(bank_summaries):
+        registers[13 + i] = int(summary['min'] * 10)
+    
+    # Bank max temperatures - registers 16-18 map to 40017-40019
+    for i, summary in enumerate(bank_summaries):
+        registers[16 + i] = int(summary['max'] * 10)
+    
+    # Bank invalid sensor counts - registers 19-21 map to 40020-40022
+    for i, summary in enumerate(bank_summaries):
+        registers[19 + i] = summary['invalid']
+    
+    # Number of series banks - register 22 maps to 40023
+    registers[22] = settings['num_series_banks']
+    
+    # Number of parallel batteries - register 23 maps to 40024
+    registers[23] = settings['number_of_parallel_batteries']
+    
+    # Total sensor count - register 24 maps to 40025
+    registers[24] = total_sensor_count
+    
+    # Valid sensor count - register 25 maps to 40026
+    registers[25] = valid_sensor_count
+    
+    # Bank voltage low threshold (centivolts) - registers 26-28 map to 40027-40029
+    low_threshold = int(settings['LowVoltageThresholdPerBattery'] * 100)
+    for i in range(settings['num_series_banks']):
+        registers[26 + i] = low_threshold
+    
+    # Bank voltage high threshold (centivolts) - registers 29-31 map to 40030-40032
+    high_threshold = int(settings['HighVoltageThresholdPerBattery'] * 100)
+    for i in range(settings['num_series_banks']):
+        registers[29 + i] = high_threshold
+    
+    # Store in global cache
+    modbus_registers = registers
+    
+    return registers
+
+def write_registers_to_datastore(context, registers):
+    """
+    Write register values to the Modbus datastore.
+    
+    Args:
+        context: ModbusServerContext object.
+        registers (dict): Dictionary of register address -> value.
+    """
+    if context is None:
+        return
+    
+    try:
+        # Get the slave context (single slave, ID=1)
+        slave = context[1]
+        
+        # Write each register value
+        for addr, value in registers.items():
+            # Clamp value to valid 16-bit unsigned range
+            value = max(0, min(65535, int(value)))
+            slave.setValues(3, addr, [value])  # 3 = holding registers
+    except Exception as e:
+        logging.error(f"Error writing to Modbus datastore: {e}")
+
+def modbus_server_thread(context, settings):
+    """
+    Background thread that runs the Modbus TCP server.
+    Also periodically updates the register values.
+    
+    Args:
+        context: ModbusServerContext object.
+        settings (dict): Configuration settings.
+    """
+    global modbus_server_running
+    
+    if not MODBUS_SERVER_AVAILABLE:
+        return
+    
+    # Server identity for Victron Cerbo GX
+    identity = ModbusDeviceIdentification()
+    identity.VendorName = 'BMS'
+    identity.ProductCode = 'BMS001'
+    identity.VendorUrl = 'https://github.com/erkel1/bms'
+    identity.ProductName = 'Battery Management System'
+    identity.ModelName = 'BMS Modbus Server'
+    identity.MajorMinorRevision = '1.0.0'
+    
+    modbus_server_running = True
+    logging.info(f"Modbus TCP server starting on port {settings['port']}")
+    
+    try:
+        # Start the server (this blocks until stopped)
+        StartTcpServer(
+            context=context,
+            identity=identity,
+            address=('0.0.0.0', settings['port'])
+        )
+    except Exception as e:
+        logging.error(f"Modbus server error: {e}")
+    finally:
+        modbus_server_running = False
+        logging.info("Modbus TCP server stopped")
+
+def modbus_updater_thread(context, settings):
+    """
+    Background thread that periodically updates Modbus register values.
+    
+    Args:
+        context: ModbusServerContext object.
+        settings (dict): Configuration settings.
+    """
+    global modbus_server_running
+    
+    if not MODBUS_SERVER_AVAILABLE:
+        return
+    
+    update_interval = settings.get('update_interval', 1.0)
+    
+    while modbus_server_running:
+        try:
+            # Update registers with current data
+            registers = update_modbus_registers(settings)
+            
+            # Write to datastore
+            if registers and context:
+                write_registers_to_datastore(context, registers)
+            
+            # Wait for next update
+            time.sleep(update_interval)
+        except Exception as e:
+            logging.error(f"Error updating Modbus registers: {e}")
+            time.sleep(1)
+
+def start_modbus_server(settings):
+    """
+    Start the Modbus TCP server for Victron Cerbo GX integration.
+    Creates the datastore and starts server + updater threads.
+    
+    Args:
+        settings (dict): Configuration settings.
+    """
+    global modbus_datastore, modbus_server_running
+    
+    if not MODBUS_SERVER_AVAILABLE:
+        logging.warning("pymodbus not available - Modbus TCP server disabled")
+        return
+    
+    if not settings.get('enabled', True):
+        logging.info("Modbus TCP server disabled via configuration")
+        return
+    
+    # Create the datastore
+    modbus_datastore = create_modbus_datastore(settings['num_series_banks'])
+    modbus_server_running = True
+    
+    if modbus_datastore is None:
+        logging.error("Failed to create Modbus datastore")
+        return
+    
+    # Start the updater thread
+    updater_thread = threading.Thread(
+        target=modbus_updater_thread,
+        args=(modbus_datastore, settings),
+        daemon=True
+    )
+    updater_thread.start()
+    logging.info("Modbus register updater thread started")
+    
+    # Start the server thread
+    server_thread = threading.Thread(
+        target=modbus_server_thread,
+        args=(modbus_datastore, settings),
+        daemon=True
+    )
+    server_thread.start()
+    logging.info(f"Modbus TCP server thread started on port {settings['port']}")
+
 def start_web_server(settings):
     """
     Start the Flask web server in a separate thread.
@@ -3885,6 +4214,9 @@ def main(stdscr):
     init_comm_stats(slave_addresses)
     # Web.
     start_web_server(settings)
+    # Modbus TCP server for Victron Cerbo GX.
+    if settings.get('enabled', True):
+        start_modbus_server(settings)
     # Give Modbus slaves time to initialize before self-test
     logging.info("Waiting 10 seconds for Modbus slaves to initialize...")
     time.sleep(10)

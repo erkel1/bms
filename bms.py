@@ -3735,12 +3735,12 @@ def modbus_server_thread(context, settings):
     
     # Server identity for Victron Cerbo GX
     identity = ModbusDeviceIdentification()
-    identity.VendorName = 'BMS'
-    identity.ProductCode = 'BMS001'
-    identity.VendorUrl = 'https://github.com/erkel1/bms'
-    identity.ProductName = 'Battery Management System'
-    identity.ModelName = 'BMS Modbus Server'
-    identity.MajorMinorRevision = '1.0.0'
+    identity.VendorName = "Victron Energy"
+    identity.ProductCode = "BMV700"
+    identity.VendorUrl = "https://www.victronenergy.com"
+    identity.ProductName = "Battery Monitor"
+    identity.ModelName = "BMV-700"
+    identity.MajorMinorRevision = "1.00"
     
     modbus_server_running = True
     logging.info(f"Modbus TCP server starting on port {settings['port']}")

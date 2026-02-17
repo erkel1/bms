@@ -3734,6 +3734,7 @@ def modbus_server_thread(context, settings):
         return
     
     # Server identity for Victron Cerbo GX
+    # Server identity for Victron Cerbo GX - replace singleton to ensure discovery works
     identity = ModbusDeviceIdentification()
     identity.VendorName = "Victron Energy"
     identity.ProductCode = "BMV700"
@@ -3741,6 +3742,10 @@ def modbus_server_thread(context, settings):
     identity.ProductName = "Battery Monitor"
     identity.ModelName = "BMV-700"
     identity.MajorMinorRevision = "1.00"
+    
+    # Replace the global ModbusControlBlock singleton identity (required for device discovery)
+    from pymodbus.pdu.device import ModbusControlBlock
+    ModbusControlBlock()._identity = identity
     
     modbus_server_running = True
     logging.info(f"Modbus TCP server starting on port {settings['port']}")

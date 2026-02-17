@@ -3640,41 +3640,55 @@ def update_modbus_registers(settings):
     # Register 262: Battery temperature - scale factor 10 (0.1°C per unit, signed)
     registers[262] = int(avg_temp * 10)
 
-    # Register 264: Alarm status (bitfield)
-    # Bit 0: Low voltage alarm
-    # Bit 1: High voltage alarm
-    # Bit 2: Low temperature alarm
-    # Bit 3: High temperature alarm
-    alarm_status = 0
-    if total_voltage < settings['LowVoltageThresholdPerBattery'] * 3:
-        alarm_status |= 0x01
-    if total_voltage > settings['HighVoltageThresholdPerBattery'] * 3:
-        alarm_status |= 0x02
-    if min_temp < settings['low_threshold']:
-        alarm_status |= 0x04
-    if max_temp > settings['high_threshold']:
-        alarm_status |= 0x08
-    registers[264] = alarm_status
-
-    # Register 265: Relay status (0 = off, 1 = on)
-    registers[265] = 1 if balancing else 0
-
-    # Register 266: Min cell/bank voltage in 0.01V
-    min_voltage = min(voltages) if voltages else 0
-    registers[266] = int(min_voltage * 100)
-
-    # Register 267: Max cell/bank voltage in 0.01V
-    max_voltage = max(voltages) if voltages else 0
-    registers[267] = int(max_voltage * 100)
-
-    # Register 268: Average cell/bank voltage in 0.01V
-    avg_voltage = sum(voltages) / len(voltages) if voltages else 0
-    registers[268] = int(avg_voltage * 100)
-
-    # Register 269: Min cell/bank temperature in 0.01C
-    registers[269] = int(min_temp * 100)
-
-    # Register 270: Max cell/bank temperature in 0.01C
+    # Register 263: Mid-point voltage of the battery bank - scale factor 100 (0.01V per unit)
+    registers[263] = 0
+    
+    # Register 264: Mid-point deviation of the battery bank - scale factor 100 (0.01% per unit)
+    registers[264] = 0
+    
+    # Register 265: Consumed Amphours - scale factor -10 (0.1Ah per unit, always negative)
+    registers[265] = 0
+    
+    # Register 266: State of charge - scale factor 10 (0.1% per unit)
+    # Simple linear mapping: 16.5V per bank = 0%, 21.5V per bank = 100%
+    soc = max(0, min(1000, int((total_voltage / 3 - 16.5) / 5.0 * 1000)))
+    registers[266] = soc
+    
+    # Register 267: Alarm (deprecated) - scale factor 1
+    registers[267] = 0
+    
+    # Register 268: Low voltage alarm - scale factor 1 (0=No alarm; 2=Alarm)
+    registers[268] = 2 if (total_voltage < settings["LowVoltageThresholdPerBattery"] * 3) else 0
+    
+    # Register 269: High voltage alarm - scale factor 1 (0=No alarm; 2=Alarm)
+    registers[269] = 2 if (total_voltage > settings["HighVoltageThresholdPerBattery"] * 3) else 0
+    
+    # Register 270: Low starter-voltage alarm - scale factor 1 (0=No alarm; 2=Alarm)
+    registers[270] = 0  # We don't measure starter voltage
+    
+    # Register 271: High starter-voltage alarm - scale factor 1 (0=No alarm; 2=Alarm)
+    registers[271] = 0  # We don't measure starter voltage
+    
+    # Register 272: Low State-of-charge alarm - scale factor 1 (0=No alarm; 2=Alarm)
+    registers[272] = 2 if (soc < 200) else 0  # 200 = 20.0%
+    
+    # Register 273: Low temperature alarm - scale factor 1 (0=No alarm; 2=Alarm)
+    registers[273] = 2 if (min_temp < settings["low_threshold"]) else 0
+    
+    # Register 274: High temperature alarm - scale factor 1 (0=No alarm; 2=Alarm)
+    registers[274] = 2 if (max_temp > settings["high_threshold"]) else 0
+    
+    # Register 275: Mid-voltage alarm - scale factor 1 (0=No alarm; 2=Alarm)
+    registers[275] = 0
+    
+    # Register 280: Relay status - scale factor 1 (0=Open; 1=Closed)
+    registers[280] = 1 if balancing else 0
+    
+    # Register 309: Capacity - scale factor 10 (0.1Ah per unit)
+    registers[309] = 0
+    
+    # Store in global cache
+    modbus_registers = registers
     registers[270] = int(max_temp * 100)
 
     # Store in global cache

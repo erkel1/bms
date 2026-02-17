@@ -3626,22 +3626,19 @@ def update_modbus_registers(settings):
         registers[29 + i] = high_threshold
     
     # --- Victron Battery Monitor Compatible Registers ---
-    # Register 259: Battery voltage (total) in 0.01V
+    # Register 259: Battery voltage (total) - scale factor 100 (0.01V per unit)
     registers[259] = int(total_voltage * 100)
 
-    # Register 260: Battery current in 0.1A (signed, we report 0 as we dont measure current)
+    # Register 260: Starter battery voltage - scale factor 100 (0.01V per unit)
+    # We don't measure this, report 0
     registers[260] = 0
 
-    # Register 261: State of charge % (estimate based on voltage)
-    # Simple linear mapping: 16.5V = 0%, 21.5V = 100%
-    soc = max(0, min(100, int((total_voltage / 3 - 16.5) / 5.0 * 100)))
-    registers[261] = soc
+    # Register 261: Current - scale factor 10 (0.1A per unit, signed)
+    # We don't measure current, report 0
+    registers[261] = 0
 
-    # Register 262: Time-to-go minutes (65535 = unknown)
-    registers[262] = 65535
-
-    # Register 263: Battery temperature in 0.01C (use average temp)
-    registers[263] = int(avg_temp * 100)
+    # Register 262: Battery temperature - scale factor 10 (0.1°C per unit, signed)
+    registers[262] = int(avg_temp * 10)
 
     # Register 264: Alarm status (bitfield)
     # Bit 0: Low voltage alarm
@@ -3649,13 +3646,13 @@ def update_modbus_registers(settings):
     # Bit 2: Low temperature alarm
     # Bit 3: High temperature alarm
     alarm_status = 0
-    if total_voltage < settings[LowVoltageThresholdPerBattery] * 3:
+    if total_voltage < settings['LowVoltageThresholdPerBattery'] * 3:
         alarm_status |= 0x01
-    if total_voltage > settings[HighVoltageThresholdPerBattery] * 3:
+    if total_voltage > settings['HighVoltageThresholdPerBattery'] * 3:
         alarm_status |= 0x02
-    if min_temp < settings[low_threshold]:
+    if min_temp < settings['low_threshold']:
         alarm_status |= 0x04
-    if max_temp > settings[high_threshold]:
+    if max_temp > settings['high_threshold']:
         alarm_status |= 0x08
     registers[264] = alarm_status
 
@@ -3698,7 +3695,7 @@ def write_registers_to_datastore(context, registers):
     
     try:
         # Get the slave context (single slave, ID=1)
-        slave = context[1]
+        slave = context[0]
         
         # Write each register value
         for addr, value in registers.items():

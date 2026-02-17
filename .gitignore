@@ -1,0 +1,6 @@
+battery_monitor.log
+bms.rrd
+__pycache__/
+*.pyc
+*.bak
+*.backup.*

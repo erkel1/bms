@@ -3501,14 +3501,14 @@ def create_modbus_datastore(num_banks):
     
     # Create holding register block (100 registers starting at address 0)
     # Each register is 16-bit unsigned (0-65535)
-    holding_block = ModbusSequentialDataBlock(0, [0]*500)
+    holding_block = ModbusSequentialDataBlock(0, [0]*100)
     
     # Create slave context with the holding register block
     slave_context = ModbusDeviceContext(
-        di=ModbusSequentialDataBlock(0, [0]*500),  # Discrete inputs
-        co=ModbusSequentialDataBlock(0, [0]*500),  # Coils
+        di=ModbusSequentialDataBlock(0, [0]*100),  # Discrete inputs
+        co=ModbusSequentialDataBlock(0, [0]*100),  # Coils
         hr=holding_block,                   # Holding registers
-        ir=ModbusSequentialDataBlock(0, [0]*500)   # Input registers
+        ir=ModbusSequentialDataBlock(0, [0]*100)   # Input registers
     )
     
     # Create server context with single slave
@@ -3625,72 +3625,6 @@ def update_modbus_registers(settings):
     for i in range(settings['num_series_banks']):
         registers[29 + i] = high_threshold
     
-    # --- Victron Battery Monitor Compatible Registers ---
-    # Register 259: Battery voltage (total) - scale factor 100 (0.01V per unit)
-    registers[259] = int(total_voltage * 100)
-
-    # Register 260: Starter battery voltage - scale factor 100 (0.01V per unit)
-    # We don't measure this, report 0
-    registers[260] = 0
-
-    # Register 261: Current - scale factor 10 (0.1A per unit, signed)
-    # We don't measure current, report 0
-    registers[261] = 0
-
-    # Register 262: Battery temperature - scale factor 10 (0.1°C per unit, signed)
-    registers[262] = int(avg_temp * 10)
-
-    # Register 263: Mid-point voltage of the battery bank - scale factor 100 (0.01V per unit)
-    registers[263] = 0
-    
-    # Register 264: Mid-point deviation of the battery bank - scale factor 100 (0.01% per unit)
-    registers[264] = 0
-    
-    # Register 265: Consumed Amphours - scale factor -10 (0.1Ah per unit, always negative)
-    registers[265] = 0
-    
-    # Register 266: State of charge - scale factor 10 (0.1% per unit)
-    # Simple linear mapping: 16.5V per bank = 0%, 21.5V per bank = 100%
-    soc = max(0, min(1000, int((total_voltage / 3 - 16.5) / 5.0 * 1000)))
-    registers[266] = soc
-    
-    # Register 267: Alarm (deprecated) - scale factor 1
-    registers[267] = 0
-    
-    # Register 268: Low voltage alarm - scale factor 1 (0=No alarm; 2=Alarm)
-    registers[268] = 2 if (total_voltage < settings["LowVoltageThresholdPerBattery"] * 3) else 0
-    
-    # Register 269: High voltage alarm - scale factor 1 (0=No alarm; 2=Alarm)
-    registers[269] = 2 if (total_voltage > settings["HighVoltageThresholdPerBattery"] * 3) else 0
-    
-    # Register 270: Low starter-voltage alarm - scale factor 1 (0=No alarm; 2=Alarm)
-    registers[270] = 0  # We don't measure starter voltage
-    
-    # Register 271: High starter-voltage alarm - scale factor 1 (0=No alarm; 2=Alarm)
-    registers[271] = 0  # We don't measure starter voltage
-    
-    # Register 272: Low State-of-charge alarm - scale factor 1 (0=No alarm; 2=Alarm)
-    registers[272] = 2 if (soc < 200) else 0  # 200 = 20.0%
-    
-    # Register 273: Low temperature alarm - scale factor 1 (0=No alarm; 2=Alarm)
-    registers[273] = 2 if (min_temp < settings["low_threshold"]) else 0
-    
-    # Register 274: High temperature alarm - scale factor 1 (0=No alarm; 2=Alarm)
-    registers[274] = 2 if (max_temp > settings["high_threshold"]) else 0
-    
-    # Register 275: Mid-voltage alarm - scale factor 1 (0=No alarm; 2=Alarm)
-    registers[275] = 0
-    
-    # Register 280: Relay status - scale factor 1 (0=Open; 1=Closed)
-    registers[280] = 1 if balancing else 0
-    
-    # Register 309: Capacity - scale factor 10 (0.1Ah per unit)
-    registers[309] = 0
-    
-    # Store in global cache
-    modbus_registers = registers
-    registers[270] = int(max_temp * 100)
-
     # Store in global cache
     modbus_registers = registers
     
@@ -3709,7 +3643,7 @@ def write_registers_to_datastore(context, registers):
     
     try:
         # Get the slave context (single slave, ID=1)
-        slave = context[0]
+        slave = context[1]
         
         # Write each register value
         for addr, value in registers.items():
@@ -3734,18 +3668,13 @@ def modbus_server_thread(context, settings):
         return
     
     # Server identity for Victron Cerbo GX
-    # Server identity for Victron Cerbo GX - replace singleton to ensure discovery works
     identity = ModbusDeviceIdentification()
-    identity.VendorName = "Victron Energy"
-    identity.ProductCode = "BMV700"
-    identity.VendorUrl = "https://www.victronenergy.com"
-    identity.ProductName = "Battery Monitor"
-    identity.ModelName = "BMV-700"
-    identity.MajorMinorRevision = "1.00"
-    
-    # Replace the global ModbusControlBlock singleton identity (required for device discovery)
-    from pymodbus.pdu.device import ModbusControlBlock
-    ModbusControlBlock()._identity = identity
+    identity.VendorName = 'BMS'
+    identity.ProductCode = 'BMS001'
+    identity.VendorUrl = 'https://github.com/erkel1/bms'
+    identity.ProductName = 'Battery Management System'
+    identity.ModelName = 'BMS Modbus Server'
+    identity.MajorMinorRevision = '1.0.0'
     
     modbus_server_running = True
     logging.info(f"Modbus TCP server starting on port {settings['port']}")

@@ -3501,7 +3501,7 @@ def create_modbus_datastore(num_banks):
     
     # Create holding register block (100 registers starting at address 0)
     # Each register is 16-bit unsigned (0-65535)
-    holding_block = ModbusSequentialDataBlock(0, [0]*100)
+    holding_block = ModbusSequentialDataBlock(0, [0]*1401)
     
     # Create slave context with the holding register block
     slave_context = ModbusDeviceContext(
@@ -3517,12 +3517,8 @@ def create_modbus_datastore(num_banks):
     return context
 
 def update_modbus_registers(settings):
-    """
-    Update Modbus holding registers with current battery data.
-    Uses the global web_data for thread-safe access to current values.
-    
-    Args:
-        settings (dict): Configuration settings.
+    """Update Modbus holding registers with current battery data.
+    Uses Victron Cerbo GX compatible register addresses.
     """
     global modbus_registers
     
@@ -3530,105 +3526,87 @@ def update_modbus_registers(settings):
         return
     
     with data_lock:
-        voltages = web_data['voltages']
-        temperatures = web_data['temperatures']
-        bank_summaries = web_data['bank_summaries']
-        alerts = web_data['alerts']
-        balancing = web_data['balancing']
-        system_status = web_data['system_status']
+        voltages = web_data["voltages"]
+        temperatures = web_data["temperatures"]
+        bank_summaries = web_data["bank_summaries"]
+        alerts = web_data["alerts"]
+        balancing = web_data["balancing"]
+        system_status = web_data["system_status"]
     
     # Calculate values
     valid_temps = [t for t in temperatures if t is not None]
     avg_temp = sum(valid_temps) / len(valid_temps) if valid_temps else 0.0
-    max_temp = max(valid_temps) if valid_temps else 0.0
-    min_temp = min(valid_temps) if valid_temps else 0.0
-    total_voltage = sum(voltages)
-    valid_sensor_count = len(valid_temps)
-    total_sensor_count = len(temperatures)
+    total_voltage = sum(voltages) if voltages else 0.0
+    min_voltage = min(voltages) if voltages else 0.0
+    max_voltage = max(voltages) if voltages else 0.0
     
-    # Build register values
+    # Skip update if no data available yet
+    if not voltages:
+        return
+    
+    # Build register values using Victron addresses
     registers = {}
     
-    # Bank voltages (centivolts) - registers 0-2 map to 40001-40003
-    for i, v in enumerate(voltages):
-        registers[i] = int(v * 100) if v is not None else 0
+    # Register 259: Battery voltage (centivolts) - Total voltage
+    registers[259] = int(total_voltage * 100)
     
-    # Total voltage (centivolts) - register 3 maps to 40004
-    registers[3] = int(total_voltage * 100)
+    # Register 261: Current (tenths of amps) - Unknown, set to 0
+    registers[261] = 0
     
-    # Average temperature (tenths of degrees) - register 4 maps to 40005
-    registers[4] = int(avg_temp * 10)
+    # Register 262: Battery temperature (tenths of degrees)
+    registers[262] = int(avg_temp * 10)
     
-    # Max temperature - register 5 maps to 40006
-    registers[5] = int(max_temp * 10)
+    # Register 266: State of charge (tenths of percent)
+    soc = max(0, min(100, (total_voltage - 18.0 * settings["num_series_banks"]) / 
+                      (21.5 - 18.0) * 100 / settings["num_series_banks"]))
+    registers[266] = int(soc * 10)
     
-    # Min temperature - register 6 maps to 40007
-    registers[6] = int(min_temp * 10)
+    # Individual alarm registers (Victron standard)
+    registers[268] = 0  # Low voltage alarm
+    registers[269] = 0  # High voltage alarm
+    registers[273] = 0  # Low temperature alarm
+    registers[274] = 0  # High temperature alarm
     
-    # System status flags - register 7 maps to 40008
-    # Bit 0: Alert active
-    # Bit 1: Balancing active
-    # Bit 2: Startup failed
-    # Bit 3: Balancer failed
-    status_flags = 0
     if alerts:
-        status_flags |= 0x01
-    if balancing:
-        status_flags |= 0x02
-    if startup_failed:
-        status_flags |= 0x04
-    if balancer_failed:
-        status_flags |= 0x08
-    registers[7] = status_flags
+        for alert in alerts:
+            alert_lower = alert.lower()
+            if "low voltage" in alert_lower or "low_voltage" in alert_lower:
+                registers[268] = 2  # Alarm
+            if "high voltage" in alert_lower or "high_voltage" in alert_lower:
+                registers[269] = 2  # Alarm
+            if "low temp" in alert_lower or "low_temp" in alert_lower:
+                registers[273] = 2  # Alarm
+            if "high temp" in alert_lower or "high_temp" in alert_lower or "over temp" in alert_lower:
+                registers[274] = 2  # Alarm
     
-    # Alert count - register 8 maps to 40009
-    registers[8] = len(alerts)
+    # Register 1282: State (Victron values: 9=Running, 10=Error, 14=Standby)
+    if system_status == "Running":
+        registers[1282] = 9  # Running
+    elif system_status == "Alert":
+        registers[1282] = 10  # Error
+    else:
+        registers[1282] = 14  # Standby
     
-    # Balancing status - register 9 maps to 40010
-    registers[9] = 1 if balancing else 0
+    # Register 1286: System; number of batteries (series banks)
+    registers[1286] = settings["num_series_banks"]
     
-    # Bank median temperatures - registers 10-12 map to 40011-40013
-    for i, summary in enumerate(bank_summaries):
-        registers[10 + i] = int(summary['median'] * 10)
+    # Register 1287: System; batteries parallel
+    registers[1287] = settings["number_of_parallel_batteries"]
     
-    # Bank min temperatures - registers 13-15 map to 40014-40016
-    for i, summary in enumerate(bank_summaries):
-        registers[13 + i] = int(summary['min'] * 10)
+    # Register 1288: System; batteries series
+    registers[1288] = settings["num_series_banks"]
     
-    # Bank max temperatures - registers 16-18 map to 40017-40019
-    for i, summary in enumerate(bank_summaries):
-        registers[16 + i] = int(summary['max'] * 10)
+    # Register 1290: System; minimum cell voltage (centivolts)
+    registers[1290] = int(min_voltage * 100)
     
-    # Bank invalid sensor counts - registers 19-21 map to 40020-40022
-    for i, summary in enumerate(bank_summaries):
-        registers[19 + i] = summary['invalid']
-    
-    # Number of series banks - register 22 maps to 40023
-    registers[22] = settings['num_series_banks']
-    
-    # Number of parallel batteries - register 23 maps to 40024
-    registers[23] = settings['number_of_parallel_batteries']
-    
-    # Total sensor count - register 24 maps to 40025
-    registers[24] = total_sensor_count
-    
-    # Valid sensor count - register 25 maps to 40026
-    registers[25] = valid_sensor_count
-    
-    # Bank voltage low threshold (centivolts) - registers 26-28 map to 40027-40029
-    low_threshold = int(settings['LowVoltageThresholdPerBattery'] * 100)
-    for i in range(settings['num_series_banks']):
-        registers[26 + i] = low_threshold
-    
-    # Bank voltage high threshold (centivolts) - registers 29-31 map to 40030-40032
-    high_threshold = int(settings['HighVoltageThresholdPerBattery'] * 100)
-    for i in range(settings['num_series_banks']):
-        registers[29 + i] = high_threshold
+    # Register 1291: System; maximum cell voltage (centivolts)
+    registers[1291] = int(max_voltage * 100)
     
     # Store in global cache
     modbus_registers = registers
     
     return registers
+
 
 def write_registers_to_datastore(context, registers):
     """

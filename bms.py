@@ -3501,14 +3501,14 @@ def create_modbus_datastore(num_banks):
     
     # Create holding register block (100 registers starting at address 0)
     # Each register is 16-bit unsigned (0-65535)
-    holding_block = ModbusSequentialDataBlock(0, [0]*100)
+    holding_block = ModbusSequentialDataBlock(0, [0]*500)
     
     # Create slave context with the holding register block
     slave_context = ModbusDeviceContext(
-        di=ModbusSequentialDataBlock(0, [0]*100),  # Discrete inputs
-        co=ModbusSequentialDataBlock(0, [0]*100),  # Coils
+        di=ModbusSequentialDataBlock(0, [0]*500),  # Discrete inputs
+        co=ModbusSequentialDataBlock(0, [0]*500),  # Coils
         hr=holding_block,                   # Holding registers
-        ir=ModbusSequentialDataBlock(0, [0]*100)   # Input registers
+        ir=ModbusSequentialDataBlock(0, [0]*500)   # Input registers
     )
     
     # Create server context with single slave
@@ -3625,6 +3625,61 @@ def update_modbus_registers(settings):
     for i in range(settings['num_series_banks']):
         registers[29 + i] = high_threshold
     
+    # --- Victron Battery Monitor Compatible Registers ---
+    # Register 259: Battery voltage (total) in 0.01V
+    registers[259] = int(total_voltage * 100)
+
+    # Register 260: Battery current in 0.1A (signed, we report 0 as we dont measure current)
+    registers[260] = 0
+
+    # Register 261: State of charge % (estimate based on voltage)
+    # Simple linear mapping: 16.5V = 0%, 21.5V = 100%
+    soc = max(0, min(100, int((total_voltage / 3 - 16.5) / 5.0 * 100)))
+    registers[261] = soc
+
+    # Register 262: Time-to-go minutes (65535 = unknown)
+    registers[262] = 65535
+
+    # Register 263: Battery temperature in 0.01C (use average temp)
+    registers[263] = int(avg_temp * 100)
+
+    # Register 264: Alarm status (bitfield)
+    # Bit 0: Low voltage alarm
+    # Bit 1: High voltage alarm
+    # Bit 2: Low temperature alarm
+    # Bit 3: High temperature alarm
+    alarm_status = 0
+    if total_voltage < settings[LowVoltageThresholdPerBattery] * 3:
+        alarm_status |= 0x01
+    if total_voltage > settings[HighVoltageThresholdPerBattery] * 3:
+        alarm_status |= 0x02
+    if min_temp < settings[low_threshold]:
+        alarm_status |= 0x04
+    if max_temp > settings[high_threshold]:
+        alarm_status |= 0x08
+    registers[264] = alarm_status
+
+    # Register 265: Relay status (0 = off, 1 = on)
+    registers[265] = 1 if balancing else 0
+
+    # Register 266: Min cell/bank voltage in 0.01V
+    min_voltage = min(voltages) if voltages else 0
+    registers[266] = int(min_voltage * 100)
+
+    # Register 267: Max cell/bank voltage in 0.01V
+    max_voltage = max(voltages) if voltages else 0
+    registers[267] = int(max_voltage * 100)
+
+    # Register 268: Average cell/bank voltage in 0.01V
+    avg_voltage = sum(voltages) / len(voltages) if voltages else 0
+    registers[268] = int(avg_voltage * 100)
+
+    # Register 269: Min cell/bank temperature in 0.01C
+    registers[269] = int(min_temp * 100)
+
+    # Register 270: Max cell/bank temperature in 0.01C
+    registers[270] = int(max_temp * 100)
+
     # Store in global cache
     modbus_registers = registers
     

@@ -1,0 +1,319 @@
+#!/usr/bin/env python3
+"""
+Custom BMS Battery Driver for Victron Venus OS (Cerbo GX)
+=========================================================
+Reads battery data from the Raspberry Pi BMS via Modbus TCP
+and publishes it as a com.victronenergy.battery service on D-Bus.
+
+This driver ONLY publishes data that the BMS actually measures:
+  - Bank voltages (total and per-bank)
+  - Temperatures (average, min/max cell)
+  - Alarm states (voltage and temperature)
+  - Balancing status
+  - System topology (banks, parallels)
+  - Charge/discharge limits (based on temperature)
+
+Data NOT published (left for SmartShunt or other monitors):
+  - State of Charge (SOC) - requires coulomb counting
+  - Current - BMS has no current sensor
+  - Power - derived from current
+  - Consumed Amphours - requires current integration
+  - Battery capacity - not measured by BMS
+
+BMS Modbus TCP Register Map (from bms.py on 192.168.15.137:502):
+  259:  Total voltage (centivolts, uint16)
+  262:  Average temperature (tenths of degrees C, int16)
+  268:  Low voltage alarm (0/1/2)
+  269:  High voltage alarm (0/1/2)
+  273:  Low temperature alarm (0/1/2)
+  274:  High temperature alarm (0/1/2)
+  1282: State (9=Running, 10=Error, 14=Standby)
+  1286: Number of batteries (series banks)
+  1287: Batteries parallel
+  1288: Batteries series
+  1290: Min cell/bank voltage (centivolts)
+  1291: Max cell/bank voltage (centivolts)
+  1306-1308: Individual bank voltages (centivolts)
+"""
+
+import sys
+import os
+import logging
+import time
+import platform
+
+# Victron library path
+sys.path.insert(1, '/opt/victronenergy/dbus-systemcalc-py/ext/velib_python')
+
+from dbus.mainloop.glib import DBusGMainLoop
+from gi.repository import GLib
+from vedbus import VeDbusService
+
+# Modbus TCP client (pymodbus 2.5.3 on Venus OS)
+from pymodbus.client.sync import ModbusTcpClient
+
+# --- Configuration ---
+BMS_HOST = '192.168.15.137'
+BMS_PORT = 502
+BMS_UNIT_ID = 1  # Server uses single=True, any unit works
+POLL_INTERVAL_MS = 2000  # Poll BMS every 2 seconds
+DEVICE_INSTANCE = 1  # D-Bus device instance for this battery
+SERVICE_NAME = 'com.victronenergy.battery.modbus_tcp_bms'
+
+# Battery system parameters (from BMS config)
+NUM_SERIES_BANKS = 3
+# Per-bank thresholds (from battery_monitor.ini)
+# Charge/discharge limits as specified for the system
+MAX_CHARGE_VOLTAGE = 61.0  # V - max charge voltage for 3S battery
+MIN_DISCHARGE_VOLTAGE = 49.5  # V - min discharge voltage for 3S battery
+MAX_CHARGE_CURRENT = 200.0    # Amps - max charge current
+MAX_DISCHARGE_CURRENT = 200.0  # Amps - max discharge current
+
+logging.basicConfig(level=logging.INFO,
+                    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+log = logging.getLogger('dbus-bms-battery')
+
+
+class BmsBatteryService:
+    def __init__(self):
+        self._modbus_client = None
+        self._connected = False
+        self._consecutive_errors = 0
+        self._max_errors = 10
+
+        # Set up D-Bus main loop
+        DBusGMainLoop(set_as_default=True)
+
+        # Create VeDbusService (register=False, we register after adding all paths)
+        self._dbusservice = VeDbusService(SERVICE_NAME, register=False)
+
+        # Management paths
+        self._dbusservice.add_path('/Mgmt/ProcessName', __file__)
+        self._dbusservice.add_path('/Mgmt/ProcessVersion', '1.1.0')
+        self._dbusservice.add_path('/Mgmt/Connection', f'Modbus TCP {BMS_HOST}:{BMS_PORT}')
+
+        # Mandatory product identification
+        self._dbusservice.add_path('/DeviceInstance', DEVICE_INSTANCE)
+        self._dbusservice.add_path('/ProductId', 0xFFFF)  # Custom product
+        self._dbusservice.add_path('/ProductName', 'BMS Battery Monitor')
+        self._dbusservice.add_path('/FirmwareVersion', '1.1')
+        self._dbusservice.add_path('/HardwareVersion', '1.0')
+        self._dbusservice.add_path('/Serial', 'BMS-MODBUS-TCP-001')
+        self._dbusservice.add_path('/Connected', 0)
+        self._dbusservice.add_path('/CustomName', 'BMS 3S Battery')
+
+        # Battery DC measurements - ONLY what BMS actually measures
+        self._dbusservice.add_path('/Dc/0/Voltage', None)
+        self._dbusservice.add_path('/Dc/0/Temperature', None)
+        # Current and Power NOT published - BMS has no current sensor
+        # SOC NOT published - BMS cannot measure SOC (SmartShunt handles this)
+
+        # Battery state
+        self._dbusservice.add_path('/State', None)
+
+        # Charge/Discharge limits for DVCC (based on BMS temperature monitoring)
+        self._dbusservice.add_path('/Info/MaxChargeVoltage', MAX_CHARGE_VOLTAGE)
+        self._dbusservice.add_path('/Info/MaxChargeCurrent', MAX_CHARGE_CURRENT)
+        self._dbusservice.add_path('/Info/MaxDischargeCurrent', MAX_DISCHARGE_CURRENT)
+        self._dbusservice.add_path('/Info/BatteryLowVoltage', MIN_DISCHARGE_VOLTAGE)
+
+        # System information - BMS knows topology
+        self._dbusservice.add_path('/System/NrOfBatteries', NUM_SERIES_BANKS)
+        self._dbusservice.add_path('/System/BatteriesParallel', 8)
+        self._dbusservice.add_path('/System/BatteriesSeries', NUM_SERIES_BANKS)
+        self._dbusservice.add_path('/System/NrOfCellsPerBattery', 1)
+        self._dbusservice.add_path('/System/MinCellVoltage', None)
+        self._dbusservice.add_path('/System/MaxCellVoltage', None)
+        self._dbusservice.add_path('/System/MinCellTemperature', None)
+        self._dbusservice.add_path('/System/MaxCellTemperature', None)
+        self._dbusservice.add_path('/System/NrOfModulesOnline', NUM_SERIES_BANKS)
+        self._dbusservice.add_path('/System/NrOfModulesOffline', 0)
+        self._dbusservice.add_path('/System/NrOfModulesBlockingCharge', 0)
+        self._dbusservice.add_path('/System/NrOfModulesBlockingDischarge', 0)
+
+        # Cell voltage/temperature IDs - BMS knows which bank has min/max
+        self._dbusservice.add_path('/System/MinVoltageCellId', '')
+        self._dbusservice.add_path('/System/MaxVoltageCellId', '')
+        self._dbusservice.add_path('/System/MinTemperatureCellId', '')
+        self._dbusservice.add_path('/System/MaxTemperatureCellId', '')
+
+        # IO control - BMS can restrict charge/discharge based on conditions
+        self._dbusservice.add_path('/Io/AllowToCharge', 1)
+        self._dbusservice.add_path('/Io/AllowToDischarge', 1)
+
+        # Alarms - BMS monitors these
+        self._dbusservice.add_path('/Alarms/Alarm', 0)
+        self._dbusservice.add_path('/Alarms/LowVoltage', 0)
+        self._dbusservice.add_path('/Alarms/HighVoltage', 0)
+        self._dbusservice.add_path('/Alarms/LowTemperature', 0)
+        self._dbusservice.add_path('/Alarms/HighTemperature', 0)
+        self._dbusservice.add_path('/Alarms/CellImbalance', 0)
+        self._dbusservice.add_path('/Alarms/InternalFailure', 0)
+        self._dbusservice.add_path('/Alarms/HighChargeTemperature', 0)
+        self._dbusservice.add_path('/Alarms/LowChargeTemperature', 0)
+
+        # Balancing - BMS actively manages this
+        self._dbusservice.add_path('/Balancing', 0)
+
+        # Register the service on D-Bus
+        self._dbusservice.register()
+        log.info(f'D-Bus service {SERVICE_NAME} registered (instance {DEVICE_INSTANCE})')
+
+        # Start polling
+        GLib.timeout_add(POLL_INTERVAL_MS, self._update)
+
+    def _connect_modbus(self):
+        """Connect to the BMS Modbus TCP server."""
+        try:
+            if self._modbus_client:
+                self._modbus_client.close()
+            self._modbus_client = ModbusTcpClient(BMS_HOST, port=BMS_PORT, timeout=3)
+            result = self._modbus_client.connect()
+            if result:
+                log.info(f'Connected to BMS at {BMS_HOST}:{BMS_PORT}')
+                self._connected = True
+                self._consecutive_errors = 0
+                return True
+            else:
+                log.warning(f'Failed to connect to BMS at {BMS_HOST}:{BMS_PORT}')
+                self._connected = False
+                return False
+        except Exception as e:
+            log.error(f'Modbus connection error: {e}')
+            self._connected = False
+            return False
+
+    def _read_register(self, address, count=1):
+        """Read holding registers from the BMS."""
+        if not self._connected:
+            if not self._connect_modbus():
+                return None
+        try:
+            result = self._modbus_client.read_holding_registers(address, count=count, unit=BMS_UNIT_ID)
+            if result.isError():
+                log.warning(f'Modbus read error at register {address}: {result}')
+                return None
+            return result.registers
+        except Exception as e:
+            log.warning(f'Modbus read exception at register {address}: {e}')
+            self._connected = False
+            return None
+
+    def _update(self):
+        """Poll BMS and update D-Bus paths with data the BMS actually provides."""
+        try:
+            # Read voltage and alarm registers in a batch (259-274)
+            main_regs = self._read_register(259, count=16)
+            if main_regs is None:
+                self._consecutive_errors += 1
+                if self._consecutive_errors >= self._max_errors:
+                    self._dbusservice['/Connected'] = 0
+                    log.error(f'BMS unreachable after {self._max_errors} attempts')
+                return True  # Keep polling
+
+            self._consecutive_errors = 0
+            self._dbusservice['/Connected'] = 1
+
+            # Decode registers the BMS actually provides
+            voltage = main_regs[0] / 100.0       # reg 259: total voltage in centivolts
+            temperature = main_regs[3] / 10.0     # reg 262: avg temperature in decicelsius
+            alarm_low_v = main_regs[9]             # reg 268: low voltage alarm
+            alarm_high_v = main_regs[10]           # reg 269: high voltage alarm
+            alarm_low_temp = main_regs[14]         # reg 273: low temperature alarm
+            alarm_high_temp = main_regs[15]        # reg 274: high temperature alarm
+
+            # Update voltage and temperature - the data BMS actually measures
+            self._dbusservice['/Dc/0/Voltage'] = round(voltage, 2)
+            self._dbusservice['/Dc/0/Temperature'] = round(temperature, 1)
+
+            # Alarms from BMS
+            self._dbusservice['/Alarms/LowVoltage'] = alarm_low_v
+            self._dbusservice['/Alarms/HighVoltage'] = alarm_high_v
+            self._dbusservice['/Alarms/LowTemperature'] = alarm_low_temp
+            self._dbusservice['/Alarms/HighTemperature'] = alarm_high_temp
+            any_alarm = max(alarm_low_v, alarm_high_v, alarm_low_temp, alarm_high_temp)
+            self._dbusservice['/Alarms/Alarm'] = any_alarm
+
+            # Read state register (1282)
+            state_regs = self._read_register(1282, count=1)
+            if state_regs:
+                self._dbusservice['/State'] = state_regs[0]
+
+            # Read system registers (1286-1291) - topology and cell voltages
+            sys_regs = self._read_register(1286, count=6)
+            if sys_regs:
+                self._dbusservice['/System/NrOfBatteries'] = sys_regs[0]
+                self._dbusservice['/System/BatteriesParallel'] = sys_regs[1]
+                self._dbusservice['/System/BatteriesSeries'] = sys_regs[2]
+                self._dbusservice['/System/NrOfCellsPerBattery'] = sys_regs[3]
+                min_cell_v = sys_regs[4] / 100.0  # reg 1290: min bank voltage
+                max_cell_v = sys_regs[5] / 100.0  # reg 1291: max bank voltage
+                self._dbusservice['/System/MinCellVoltage'] = round(min_cell_v, 3)
+                self._dbusservice['/System/MaxCellVoltage'] = round(max_cell_v, 3)
+
+                # Cell imbalance alarm based on voltage spread between banks
+                cell_spread = max_cell_v - min_cell_v
+                self._dbusservice['/Alarms/CellImbalance'] = 2 if cell_spread > 0.5 else (1 if cell_spread > 0.3 else 0)
+
+            # Read individual bank voltages (1306-1308)
+            bank_regs = self._read_register(1306, count=NUM_SERIES_BANKS)
+            if bank_regs:
+                bank_voltages = [v / 100.0 for v in bank_regs]
+                min_bank = min(bank_voltages)
+                max_bank = max(bank_voltages)
+                min_idx = bank_voltages.index(min_bank) + 1
+                max_idx = bank_voltages.index(max_bank) + 1
+                self._dbusservice['/System/MinVoltageCellId'] = f'Bank {min_idx}'
+                self._dbusservice['/System/MaxVoltageCellId'] = f'Bank {max_idx}'
+
+            # Charge/discharge permission based on BMS state
+            if state_regs and state_regs[0] == 10:  # Error state
+                self._dbusservice['/Io/AllowToCharge'] = 0
+                self._dbusservice['/Io/AllowToDischarge'] = 0
+            else:
+                self._dbusservice['/Io/AllowToCharge'] = 1
+                self._dbusservice['/Io/AllowToDischarge'] = 1
+
+            # Adjust charge current limits based on BMS temperature data
+            if temperature > 45:
+                self._dbusservice['/Info/MaxChargeCurrent'] = 0
+                self._dbusservice['/Alarms/HighChargeTemperature'] = 2
+            elif temperature > 40:
+                self._dbusservice['/Info/MaxChargeCurrent'] = MAX_CHARGE_CURRENT * 0.5
+                self._dbusservice['/Alarms/HighChargeTemperature'] = 1
+            elif temperature < 0:
+                self._dbusservice['/Info/MaxChargeCurrent'] = 0
+                self._dbusservice['/Alarms/LowChargeTemperature'] = 2
+            elif temperature < 5:
+                self._dbusservice['/Info/MaxChargeCurrent'] = MAX_CHARGE_CURRENT * 0.25
+                self._dbusservice['/Alarms/LowChargeTemperature'] = 1
+            else:
+                self._dbusservice['/Info/MaxChargeCurrent'] = MAX_CHARGE_CURRENT
+                self._dbusservice['/Alarms/HighChargeTemperature'] = 0
+                self._dbusservice['/Alarms/LowChargeTemperature'] = 0
+
+            log.debug(f'Updated: V={voltage:.2f}V T={temperature:.1f}C')
+
+        except Exception as e:
+            log.error(f'Update error: {e}')
+            import traceback
+            traceback.print_exc()
+
+        return True  # Keep the GLib timeout running
+
+
+def main():
+    log.info('Starting BMS Battery D-Bus service v1.1')
+    log.info(f'BMS: {BMS_HOST}:{BMS_PORT} unit={BMS_UNIT_ID}')
+    log.info(f'Service: {SERVICE_NAME} instance={DEVICE_INSTANCE}')
+    log.info('NOTE: SOC/Current/Power NOT published - BMS only provides voltage, temperature, alarms')
+
+    service = BmsBatteryService()
+
+    log.info('Entering GLib main loop')
+    mainloop = GLib.MainLoop()
+    mainloop.run()
+
+
+if __name__ == '__main__':
+    main()

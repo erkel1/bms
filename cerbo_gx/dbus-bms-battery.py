@@ -64,10 +64,12 @@ SERVICE_NAME = 'com.victronenergy.battery.modbus_tcp_bms'
 NUM_SERIES_BANKS = 3
 # Per-bank thresholds (from battery_monitor.ini)
 # Charge/discharge limits as specified for the system
-MAX_CHARGE_VOLTAGE = 61.0  # V - max charge voltage for 3S battery
-MIN_DISCHARGE_VOLTAGE = 49.5  # V - min discharge voltage for 3S battery
-MAX_CHARGE_CURRENT = 200.0    # Amps - max charge current
-MAX_DISCHARGE_CURRENT = 200.0  # Amps - max discharge current
+# DVCC limits are read from BMS Modbus registers 305-308 (set in battery_monitor.ini [DVCC])
+# Fallback defaults only used if registers can't be read
+DVCC_FALLBACK_MAX_CHARGE_VOLTAGE = 61.0
+DVCC_FALLBACK_MIN_DISCHARGE_VOLTAGE = 49.5
+DVCC_FALLBACK_MAX_CHARGE_CURRENT = 200.0
+DVCC_FALLBACK_MAX_DISCHARGE_CURRENT = 200.0
 
 logging.basicConfig(level=logging.INFO,
                     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -112,10 +114,10 @@ class BmsBatteryService:
         self._dbusservice.add_path('/State', None)
 
         # Charge/Discharge limits for DVCC (based on BMS temperature monitoring)
-        self._dbusservice.add_path('/Info/MaxChargeVoltage', MAX_CHARGE_VOLTAGE)
-        self._dbusservice.add_path('/Info/MaxChargeCurrent', MAX_CHARGE_CURRENT)
-        self._dbusservice.add_path('/Info/MaxDischargeCurrent', MAX_DISCHARGE_CURRENT)
-        self._dbusservice.add_path('/Info/BatteryLowVoltage', MIN_DISCHARGE_VOLTAGE)
+        self._dbusservice.add_path('/Info/MaxChargeVoltage', DVCC_FALLBACK_MAX_CHARGE_VOLTAGE)
+        self._dbusservice.add_path('/Info/MaxChargeCurrent', DVCC_FALLBACK_MAX_CHARGE_CURRENT)
+        self._dbusservice.add_path('/Info/MaxDischargeCurrent', DVCC_FALLBACK_MAX_DISCHARGE_CURRENT)
+        self._dbusservice.add_path('/Info/BatteryLowVoltage', DVCC_FALLBACK_MIN_DISCHARGE_VOLTAGE)
 
         # System information - BMS knows topology
         self._dbusservice.add_path('/System/NrOfBatteries', NUM_SERIES_BANKS)
@@ -266,6 +268,19 @@ class BmsBatteryService:
                 self._dbusservice['/System/MinVoltageCellId'] = f'Bank {min_idx}'
                 self._dbusservice['/System/MaxVoltageCellId'] = f'Bank {max_idx}'
 
+            # Read DVCC limits from BMS (registers 305-308, set in battery_monitor.ini [DVCC])
+            dvcc_regs = self._read_register(305, count=4)
+            if dvcc_regs:
+                max_charge_v = dvcc_regs[0] / 10.0   # reg 305: decivolts
+                min_discharge_v = dvcc_regs[1] / 10.0 # reg 306: decivolts
+                max_charge_i = dvcc_regs[2] / 10.0    # reg 307: deciamps
+                max_discharge_i = dvcc_regs[3] / 10.0  # reg 308: deciamps
+                self._dbusservice['/Info/MaxChargeVoltage'] = max_charge_v
+                self._dbusservice['/Info/BatteryLowVoltage'] = min_discharge_v
+                self._dbusservice['/Info/MaxDischargeCurrent'] = max_discharge_i
+            else:
+                max_charge_i = DVCC_FALLBACK_MAX_CHARGE_CURRENT
+
             # Charge/discharge permission based on BMS state
             if state_regs and state_regs[0] == 10:  # Error state
                 self._dbusservice['/Io/AllowToCharge'] = 0
@@ -279,16 +294,16 @@ class BmsBatteryService:
                 self._dbusservice['/Info/MaxChargeCurrent'] = 0
                 self._dbusservice['/Alarms/HighChargeTemperature'] = 2
             elif temperature > 40:
-                self._dbusservice['/Info/MaxChargeCurrent'] = MAX_CHARGE_CURRENT * 0.5
+                self._dbusservice['/Info/MaxChargeCurrent'] = max_charge_i * 0.5
                 self._dbusservice['/Alarms/HighChargeTemperature'] = 1
             elif temperature < 0:
                 self._dbusservice['/Info/MaxChargeCurrent'] = 0
                 self._dbusservice['/Alarms/LowChargeTemperature'] = 2
             elif temperature < 5:
-                self._dbusservice['/Info/MaxChargeCurrent'] = MAX_CHARGE_CURRENT * 0.25
+                self._dbusservice['/Info/MaxChargeCurrent'] = max_charge_i * 0.25
                 self._dbusservice['/Alarms/LowChargeTemperature'] = 1
             else:
-                self._dbusservice['/Info/MaxChargeCurrent'] = MAX_CHARGE_CURRENT
+                self._dbusservice['/Info/MaxChargeCurrent'] = max_charge_i
                 self._dbusservice['/Alarms/HighChargeTemperature'] = 0
                 self._dbusservice['/Alarms/LowChargeTemperature'] = 0
 

@@ -1078,6 +1078,13 @@ def load_config(data_dir):
         'unit_id': config_parser.getint('ModbusServer', 'unit_id', fallback=1),  # Modbus unit/slave ID.
         'update_interval': config_parser.getfloat('ModbusServer', 'update_interval', fallback=1.0)  # Register update interval.
     }
+    # DVCC (Distributed Voltage and Current Control) limits for Victron Cerbo GX.
+    dvcc_settings = {
+        'dvcc_max_charge_voltage': config_parser.getfloat('DVCC', 'max_charge_voltage', fallback=61.0),  # Max charge voltage (V).
+        'dvcc_max_charge_current': config_parser.getfloat('DVCC', 'max_charge_current', fallback=200.0),  # Max charge current (A).
+        'dvcc_max_discharge_current': config_parser.getfloat('DVCC', 'max_discharge_current', fallback=200.0),  # Max discharge current (A).
+        'dvcc_min_discharge_voltage': config_parser.getfloat('DVCC', 'min_discharge_voltage', fallback=49.5),  # Min discharge voltage (V).
+    }
     # Relay mapping for balancing pairs (e.g., bank1-bank2 uses certain relay bits).
     relay_mapping = {}
     if config_parser.has_section('RelayMapping'):
@@ -1101,7 +1108,7 @@ def load_config(data_dir):
     }
     return {**temp_settings, **voltage_settings, **general_flags, **i2c_settings,
             **gpio_settings, **email_settings, **adc_settings, **calibration_settings,
-            **startup_settings, **web_settings, **modbus_server_settings, 'relay_mapping': relay_mapping, **relay_pins}
+            **startup_settings, **web_settings, **modbus_server_settings, **dvcc_settings, 'relay_mapping': relay_mapping, **relay_pins}
 
 def validate_config(settings):
     """
@@ -3502,7 +3509,7 @@ def create_modbus_datastore(num_banks):
     
     # Create holding register block (100 registers starting at address 0)
     # Each register is 16-bit unsigned (0-65535)
-    holding_block = ModbusSequentialDataBlock(0, [0]*1401)
+    holding_block = ModbusSequentialDataBlock(0, [0]*36001)
     
     # Create slave context with the holding register block
     slave_context = ModbusDeviceContext(
@@ -3602,7 +3609,63 @@ def update_modbus_registers(settings):
     
     # Register 1291: System; maximum cell voltage (centivolts)
     registers[1291] = int(max_voltage * 100)
+
+    # =========================================================================
+    # Pylontech-compatible registers (addresses the Cerbo GX actually reads)
+    # =========================================================================
+
+    # Register 11: Number of modules (Pylontech)
+    registers[11] = settings["num_series_banks"]
+
+    # Register 4: Battery voltage (decivolts for Pylontech)
+    registers[4] = int(total_voltage * 10)
+
+    # Register 768-771: Solar charger compatible registers
+    registers[768] = int(total_voltage * 100)  # Battery voltage centivolts
+    registers[769] = 0  # Current
+    registers[770] = int(total_voltage * 100)  # Battery voltage centivolts
+    registers[771] = int(total_voltage * 100)  # Battery voltage centivolts
+
+    # Register 5000: Pylontech module info
+    registers[5000] = int(total_voltage * 100)
+
+    # Register 5672: Pylontech extended info
+    registers[5672] = int(total_voltage * 100)
+
+    # Register 35168 (0x8960): Pylontech identification area
+    # Cerbo GX expects Pylontech-specific values here
+    # Register 35168: Number of modules (Pylontech standard)
+    # Register 35169: Module voltage (centivolts)
+    registers[35168] = settings["num_series_banks"]  # Number of battery modules
+    registers[35169] = int(total_voltage * 100)  # Module voltage in centivolts
     
+    # Additional Pylontech-compatible registers for device identification
+    # These help the Cerbo GX identify this as a Pylontech-compatible battery
+    registers[35170] = 1  # Module 1 online
+    registers[35171] = 1  # Module 2 online
+    registers[35172] = 1  # Module 3 online
+    
+    # =========================================================================
+    # Battery string voltage registers (Victron standard)
+    # The Cerbo GX reads these to get individual bank voltages
+    # Register 1306: String 1 voltage (centivolts)
+    # Register 1307: String 2 voltage (centivolts)
+    # etc.
+    # =========================================================================
+    for i, voltage in enumerate(voltages):
+        if i < 16:  # Max 16 strings supported
+            registers[1306 + i] = int(voltage * 100)
+    
+    # DVCC limits from config (registers 305-308, Victron standard)
+    # Reg 305: Max charge voltage (decivolts, scale=10)
+    registers[305] = int(settings.get('dvcc_max_charge_voltage', 61.0) * 10)
+    # Reg 306: Min discharge voltage (decivolts, scale=10)
+    registers[306] = int(settings.get('dvcc_min_discharge_voltage', 49.5) * 10)
+    # Reg 307: Max charge current (deciamps, scale=10)
+    registers[307] = int(settings.get('dvcc_max_charge_current', 200.0) * 10)
+    # Reg 308: Max discharge current (deciamps, scale=10)
+    registers[308] = int(settings.get('dvcc_max_discharge_current', 200.0) * 10)
+
     # Store in global cache
     modbus_registers = registers
     

@@ -139,6 +139,10 @@ class BmsBatteryService:
         self._dbusservice.add_path('/Voltages/Sum', None)
         self._dbusservice.add_path('/Voltages/Diff', None)
 
+        # Per-bank temperatures
+        for i in range(1, NUM_SERIES_BANKS + 1):
+            self._dbusservice.add_path(f'/Temperatures/Cell{i}', None)
+
         # Cell voltage/temperature IDs - BMS knows which bank has min/max
         self._dbusservice.add_path('/System/MinVoltageCellId', '')
         self._dbusservice.add_path('/System/MaxVoltageCellId', '')
@@ -279,6 +283,29 @@ class BmsBatteryService:
                     self._dbusservice[f'/Voltages/Cell{i+1}'] = round(bv, 3)
                 self._dbusservice['/Voltages/Sum'] = round(sum(bank_voltages), 3)
                 self._dbusservice['/Voltages/Diff'] = round(max_bank - min_bank, 3)
+
+            # Read bank temperatures (registers 318-328)
+            temp_regs = self._read_register(318, count=11)
+            if temp_regs:
+                min_cell_temp = temp_regs[0] / 10.0  # reg 318
+                max_cell_temp = temp_regs[1] / 10.0  # reg 319
+                if min_cell_temp != 0:
+                    self._dbusservice['/System/MinCellTemperature'] = round(min_cell_temp, 1)
+                if max_cell_temp != 0:
+                    self._dbusservice['/System/MaxCellTemperature'] = round(max_cell_temp, 1)
+                # Per-bank median temperatures (regs 320-322)
+                for i in range(NUM_SERIES_BANKS):
+                    bank_temp = temp_regs[2 + i] / 10.0  # regs 320, 321, 322
+                    if bank_temp != 0:
+                        self._dbusservice[f'/Temperatures/Cell{i+1}'] = round(bank_temp, 1)
+                # Find which bank has min/max temp
+                bank_medians = [temp_regs[2 + i] / 10.0 for i in range(NUM_SERIES_BANKS)]
+                valid_medians = [(t, i) for i, t in enumerate(bank_medians) if t != 0]
+                if valid_medians:
+                    min_t_bank = min(valid_medians, key=lambda x: x[0])
+                    max_t_bank = max(valid_medians, key=lambda x: x[0])
+                    self._dbusservice['/System/MinTemperatureCellId'] = f'Bank {min_t_bank[1]+1}'
+                    self._dbusservice['/System/MaxTemperatureCellId'] = f'Bank {max_t_bank[1]+1}'
 
             # Read DVCC limits from BMS (registers 305-308, set in battery_monitor.ini [DVCC])
             dvcc_regs = self._read_register(305, count=4)

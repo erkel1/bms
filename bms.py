@@ -3669,6 +3669,23 @@ def update_modbus_registers(settings):
     # Reg 308: Max discharge current (deciamps, scale=10)
     registers[308] = int(settings.get('dvcc_max_discharge_current', 200.0) * 10)
 
+    # Bank temperature registers (318-329)
+    # Victron standard: 318 = min cell temp, 319 = max cell temp (decicelsius)
+    # Extended: 320-322 = bank 1/2/3 median temps, 323-325 = bank min, 326-328 = bank max
+    if bank_summaries:
+        all_mins = [s['min'] for s in bank_summaries if s['min'] != 0]
+        all_maxs = [s['max'] for s in bank_summaries if s['max'] != 0]
+        if all_mins:
+            registers[318] = int(min(all_mins) * 10)  # Min cell temperature (decicelsius)
+        if all_maxs:
+            registers[319] = int(max(all_maxs) * 10)  # Max cell temperature (decicelsius)
+        # Per-bank median temperatures (registers 320-322)
+        for i, summary in enumerate(bank_summaries):
+            if i < 3:
+                registers[320 + i] = int(summary['median'] * 10)  # Bank median temp (decicelsius)
+                registers[323 + i] = int(summary['min'] * 10)     # Bank min temp (decicelsius)
+                registers[326 + i] = int(summary['max'] * 10)     # Bank max temp (decicelsius)
+
     # Store in global cache
     modbus_registers = registers
     

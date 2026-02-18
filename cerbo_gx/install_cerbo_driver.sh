@@ -105,6 +105,18 @@ else
     echo "=== Installation may have issues ==="
 fi
 
+# Apply QML modification for cell voltage display
+echo ""
+echo "Applying GUI modification for cell voltage display..."
+SCRIPT_DIR_QML="$(cd "$(dirname "$0")" && pwd)"
+if [ -f "${SCRIPT_DIR_QML}/PageBattery.qml.modified" ]; then
+    sshpass -p "${CERBO_PASS}" scp -o StrictHostKeyChecking=no "${SCRIPT_DIR_QML}/PageBattery.qml.modified" root@${CERBO_IP}:/data/dbus-bms-battery/PageBattery.qml.modified
+    sshpass -p "${CERBO_PASS}" ssh -o StrictHostKeyChecking=no root@${CERBO_IP} "cp /data/dbus-bms-battery/PageBattery.qml.modified /opt/victronenergy/gui/qml/PageBattery.qml; svc -t /service/start-gui 2>/dev/null"
+    echo "GUI modified - Battery row now shows individual cell voltages"
+else
+    echo "WARNING: PageBattery.qml.modified not found - skipping GUI modification"
+fi
+
 echo ""
 echo "Post-install steps:"
 echo "  1. Set the SmartShunt as active battery monitor on the Cerbo GX:"

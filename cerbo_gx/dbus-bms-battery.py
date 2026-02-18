@@ -123,7 +123,7 @@ class BmsBatteryService:
         self._dbusservice.add_path('/System/NrOfBatteries', NUM_SERIES_BANKS)
         self._dbusservice.add_path('/System/BatteriesParallel', 8)
         self._dbusservice.add_path('/System/BatteriesSeries', NUM_SERIES_BANKS)
-        self._dbusservice.add_path('/System/NrOfCellsPerBattery', 1)
+        self._dbusservice.add_path('/System/NrOfCellsPerBattery', NUM_SERIES_BANKS)
         self._dbusservice.add_path('/System/MinCellVoltage', None)
         self._dbusservice.add_path('/System/MaxCellVoltage', None)
         self._dbusservice.add_path('/System/MinCellTemperature', None)
@@ -253,7 +253,7 @@ class BmsBatteryService:
                 self._dbusservice['/System/NrOfBatteries'] = sys_regs[0]
                 self._dbusservice['/System/BatteriesParallel'] = sys_regs[1]
                 self._dbusservice['/System/BatteriesSeries'] = sys_regs[2]
-                self._dbusservice['/System/NrOfCellsPerBattery'] = sys_regs[3]
+                self._dbusservice['/System/NrOfCellsPerBattery'] = NUM_SERIES_BANKS  # 3 banks = 3 cells in series
                 min_cell_v = sys_regs[4] / 100.0  # reg 1290: min bank voltage
                 max_cell_v = sys_regs[5] / 100.0  # reg 1291: max bank voltage
                 self._dbusservice['/System/MinCellVoltage'] = round(min_cell_v, 3)

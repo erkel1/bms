@@ -3603,6 +3603,9 @@ def update_modbus_registers(settings):
     
     # Register 1288: System; batteries series
     registers[1288] = settings["num_series_banks"]
+
+    # Register 1289: System; number of cells per battery (= num_series_banks, each bank is one cell)
+    registers[1289] = settings["num_series_banks"]
     
     # Register 1290: System; minimum cell voltage (centivolts)
     registers[1290] = int(min_voltage * 100)

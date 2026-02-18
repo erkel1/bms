@@ -133,6 +133,12 @@ class BmsBatteryService:
         self._dbusservice.add_path('/System/NrOfModulesBlockingCharge', 0)
         self._dbusservice.add_path('/System/NrOfModulesBlockingDischarge', 0)
 
+        # Individual cell/bank voltages (Cerbo GUI reads these)
+        for i in range(1, NUM_SERIES_BANKS + 1):
+            self._dbusservice.add_path(f'/Voltages/Cell{i}', None)
+        self._dbusservice.add_path('/Voltages/Sum', None)
+        self._dbusservice.add_path('/Voltages/Diff', None)
+
         # Cell voltage/temperature IDs - BMS knows which bank has min/max
         self._dbusservice.add_path('/System/MinVoltageCellId', '')
         self._dbusservice.add_path('/System/MaxVoltageCellId', '')
@@ -267,6 +273,12 @@ class BmsBatteryService:
                 max_idx = bank_voltages.index(max_bank) + 1
                 self._dbusservice['/System/MinVoltageCellId'] = f'Bank {min_idx}'
                 self._dbusservice['/System/MaxVoltageCellId'] = f'Bank {max_idx}'
+
+                # Publish individual cell/bank voltages for Cerbo GUI
+                for i, bv in enumerate(bank_voltages):
+                    self._dbusservice[f'/Voltages/Cell{i+1}'] = round(bv, 3)
+                self._dbusservice['/Voltages/Sum'] = round(sum(bank_voltages), 3)
+                self._dbusservice['/Voltages/Diff'] = round(max_bank - min_bank, 3)
 
             # Read DVCC limits from BMS (registers 305-308, set in battery_monitor.ini [DVCC])
             dvcc_regs = self._read_register(305, count=4)

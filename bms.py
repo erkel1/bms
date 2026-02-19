@@ -397,6 +397,9 @@ balancing_active = False # Indicates if balancing is currently happening - balan
 startup_failed = False # Indicates if startup tests failed - test fail flag.
 startup_alerts = [] # Stores startup test failure messages - test error list.
 balancer_failed = False # New: Indicates if balancer hardware failed verification - prevents future balancing.
+balancer_failed_time = None # Timestamp when balancer_failed was set - for auto-recovery timing.
+balancer_fail_count = 0 # Consecutive balance failure count - escalates recovery cooldown.
+balancer_fail_reason = "" # Stores the specific reason for the last balance failure - shown in GUI.
 web_server = None # Web server object - web host.
 event_log = [] # Stores the last N events (configurable) - event history.
 web_data = {
@@ -2021,7 +2024,7 @@ def check_for_issues(voltages, temps_alerts, settings):
         tuple: (alert_needed bool, list of all alerts)
     """
     # Global flags.
-    global startup_failed, startup_alerts, balancer_failed
+    global startup_failed, startup_alerts, balancer_failed, balancer_fail_reason
     # Log start.
     logging.info("Checking for voltage and temp issues.")
     # Initial: Check flags.
@@ -2031,9 +2034,12 @@ def check_for_issues(voltages, temps_alerts, settings):
     # Add startup alerts if failed.
     if startup_failed and startup_alerts:
         alerts.append("Startup failures: " + "; ".join(startup_alerts))
-    # Add balancer flag alert.
+    # Add balancer flag alert with verbose reason.
     if balancer_failed:
-        alerts.append("Balancer hardware failure detected - balancing disabled.")
+        if balancer_fail_reason:
+            alerts.append(f"Balancer FAILED: {balancer_fail_reason}")
+        else:
+            alerts.append("Balancer hardware failure detected - balancing disabled.")
     # Check each voltage.
     for i, v in enumerate(voltages, 1):
         if v is None or v == 0.0:
@@ -2106,7 +2112,7 @@ def balance_battery_voltages(stdscr, high, low, settings, temps_alerts, is_heati
         None
     """
     # Globals for state.
-    global balance_start_time, last_balance_time, balancing_active, web_data, alive_timestamp, balancer_failed
+    global balance_start_time, last_balance_time, balancing_active, web_data, alive_timestamp, balancer_failed, balancer_failed_time, balancer_fail_count, balancer_fail_reason
     # Skip if balancer hardware failed.
     if balancer_failed:
         logging.warning("Skipping balancing due to balancer_failed flag.")
@@ -2263,20 +2269,30 @@ def balance_battery_voltages(stdscr, high, low, settings, temps_alerts, is_heati
                         f"(High {high_change:+.3f}V, Low {low_change:+.3f}V). "
                         f"Will NOT set balancer_failed - check DC-DC converter pulsing.")
                 logging.warning(alert)
+                event_log.append(f"{time.strftime('%Y-%m-%d %H:%M:%S')}: {alert}")
+                if len(event_log) > settings.get('EventLogSize', 20):
+                    event_log.pop(0)
             else:
                 alert = (f"Balancing failed from Bank {high} to {low}: No voltage change detected "
-                        f"(Averaged High change: {high_change:+.3f}V, Low change: {low_change:+.3f}V). "
-                        f"Possible relay failure.")
-            # Alert logged to event_log - balancing failures shown via event history
-            event_log.append(f"{time.strftime('%Y-%m-%d %H:%M:%S')}: {alert}")
-            if len(event_log) > settings.get('EventLogSize', 20):
-                event_log.pop(0)
-            logging.error(alert)
-            balancer_failed = True
+                        f"(Averaged High change: {high_change:+.3f}V, Low change: {low_change:+.3f}V, "
+                        f"Discrete High: {discrete_high_change:+.3f}V, Low: {discrete_low_change:+.3f}V). "
+                        f"Possible relay or DC-DC converter failure.")
+                event_log.append(f"{time.strftime('%Y-%m-%d %H:%M:%S')}: {alert}")
+                if len(event_log) > settings.get('EventLogSize', 20):
+                    event_log.pop(0)
+                logging.error(alert)
+                balancer_failed = True
+                balancer_failed_time = time.time()
+                balancer_fail_count += 1
+                balancer_fail_reason = alert
         else:
             # Success - log both averaged and discrete changes
             logging.info(f"Balancing verified: Averaged change: High {high_change:+.3f}V, Low {low_change:+.3f}V | "
                         f"Discrete change: High {discrete_high_change:+.3f}V, Low {discrete_low_change:+.3f}V.")
+            # Reset consecutive failure counter on success
+            if balancer_fail_count > 0:
+                logging.info(f"Balancer recovery: successful verification after {balancer_fail_count} consecutive failure(s).")
+                balancer_fail_count = 0
     else:
         logging.warning(f"Insufficient readings for balancing verification from {high} to {low}.")
     # Log end.
@@ -2949,7 +2965,7 @@ def startup_self_test(settings, stdscr, data_dir):
         list: Empty if passed, or alerts (but proceeds anyway after retries).
     """
     # Globals.
-    global startup_failed, startup_alerts, startup_set, startup_median, startup_offsets, balancer_failed
+    global startup_failed, startup_alerts, startup_set, startup_median, startup_offsets, balancer_failed, balancer_failed_time, balancer_fail_count, balancer_fail_reason
     # Skip if disabled.
     if not settings['StartupSelfTestEnabled']:
         logging.info("Startup self-test disabled via configuration.")
@@ -2963,6 +2979,8 @@ def startup_self_test(settings, stdscr, data_dir):
         logging.info(f"Starting self-test attempt {retries + 1}")
         # Reset balancer_failed at start of each attempt so previous failures dont persist
         balancer_failed = False
+        balancer_failed_time = None
+        balancer_fail_reason = ""
         # Alerts for this run.
         alerts = []
         # Clear screen.
@@ -3380,6 +3398,9 @@ def startup_self_test(settings, stdscr, data_dir):
                                 event_log.pop(0)
                             logging.error(alert)
                             balancer_failed = True
+                            balancer_failed_time = time.time()
+                            balancer_fail_count += 1
+                            balancer_fail_reason = alert
                             if progress_y + 1 < stdscr.getmaxyx()[0]:
                                 try:
                                     stdscr.addstr(progress_y + 1, 0, f"Test FAILED: Source {source_change:+.3f}V, Dest {dest_change:+.3f}V. Diff {'reduced' if diff_reduced else 'not reduced'}.", curses.color_pair(2))
@@ -3401,6 +3422,9 @@ def startup_self_test(settings, stdscr, data_dir):
                         event_log.pop(0)
                     logging.error(f"Balance test from Bank {source} to Bank {dest} failed: Only {len(source_trend)} readings collected.")
                     balancer_failed = True
+                    balancer_failed_time = time.time()
+                    balancer_fail_count += 1
+                    balancer_fail_reason = alert
                     if progress_y + 1 < stdscr.getmaxyx()[0]:
                         try:
                             stdscr.addstr(progress_y + 1, 0, "Test failed: Insufficient readings.", curses.color_pair(2))
@@ -4320,7 +4344,7 @@ def main(stdscr):
     curses.init_pair(9, curses.COLOR_WHITE, -1)     # Spare
     stdscr.nodelay(True)
     # Globals.
-    global previous_temps, previous_bank_medians, run_count, startup_offsets, startup_median, startup_set, battery_voltages, web_data, balancing_active, BANK_SENSOR_INDICES, alive_timestamp, NUM_BANKS, balancer_failed, comm_stats, REASONABLE_TEMP_MIN, REASONABLE_TEMP_MAX, CONSECUTIVE_FAILURE_THRESHOLD
+    global previous_temps, previous_bank_medians, run_count, startup_offsets, startup_median, startup_set, battery_voltages, web_data, balancing_active, BANK_SENSOR_INDICES, alive_timestamp, NUM_BANKS, balancer_failed, balancer_failed_time, balancer_fail_count, balancer_fail_reason, comm_stats, REASONABLE_TEMP_MIN, REASONABLE_TEMP_MAX, CONSECUTIVE_FAILURE_THRESHOLD
     # Load and validate config.
     settings = load_config(data_dir)
     validate_config(settings)
@@ -4479,6 +4503,21 @@ def main(stdscr):
         if balancer_failed and balancing_active:
             logging.warning("Resetting balancing_active flag - balancer_failed prevents balancing")
             balancing_active = False
+        # Auto-recovery: Reset balancer_failed after cooldown period to allow retry.
+        # Cooldown escalates: 300s (5min) for first failure, 1800s (30min) after 3+ consecutive failures.
+        if balancer_failed and balancer_failed_time is not None:
+            cooldown = 1800 if balancer_fail_count >= 3 else 300
+            elapsed = time.time() - balancer_failed_time
+            if elapsed >= cooldown:
+                logging.warning(f"Auto-recovery: Resetting balancer_failed after {elapsed:.0f}s cooldown "
+                              f"(fail_count={balancer_fail_count}, cooldown was {cooldown}s). "
+                              f"Will retry balancing on next cycle.")
+                event_log.append(f"{time.strftime('%Y-%m-%d %H:%M:%S')}: Auto-recovery: balancer reset after {cooldown}s cooldown (failures: {balancer_fail_count})")
+                if len(event_log) > settings.get('EventLogSize', 20):
+                    event_log.pop(0)
+                balancer_failed = False
+                balancer_failed_time = None
+                balancer_fail_reason = ""
         # Balance decision.
         if len(battery_voltages) == NUM_BANKS and not balancer_failed:
             max_v = max(battery_voltages) # Find highest voltage bank

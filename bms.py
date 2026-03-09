@@ -1468,9 +1468,17 @@ def perform_calibration(settings, raw_temps, data_dir):
     # Check if offsets already exist
     if os.path.exists(offsets_file):
         # Load existing offsets - NEVER auto-recalculate
-        startup_median, startup_offsets = load_offsets(settings['total_channels'], data_dir)
+        _saved_median, startup_offsets = load_offsets(settings['total_channels'], data_dir)
         if startup_offsets is not None:
-            logging.info(f"Loaded existing calibration: Median={startup_median:.1f}C (offsets.txt)")
+            # Calculate fresh startup_median from current readings for display
+            # Offsets are preserved from original calibration for accuracy
+            valid_temps = [t for t in raw_temps if t is not None and t > settings['valid_min']]
+            if valid_temps:
+                startup_median = statistics.median(valid_temps)
+                logging.info(f"Loaded calibration offsets (cal median={_saved_median:.1f}C). Current startup median={startup_median:.1f}C")
+            else:
+                startup_median = _saved_median
+                logging.info(f"Loaded existing calibration: Median={startup_median:.1f}C (no valid current readings)")
             _calibration_cache = (startup_median, startup_offsets)
             return startup_median, startup_offsets
     
@@ -1880,13 +1888,17 @@ def read_voltage_with_retry(bank_id, settings):
         # If readings, average.
         if readings:
             average = sum(readings) / len(readings)
-            # Filter valid: Within 5% of average.
-            valid_readings = [r for r in readings if abs(r - average) / (average if average != 0 else 1) <= 0.05]
-            valid_adc = [raw_values[i] for i, r in enumerate(readings) if abs(r - average) / (average if average != 0 else 1) <= 0.05]
-            if valid_readings:
-                # Success—average valids.
-                logging.info(f"Voltage read successful for Bank {bank_id}: {average:.2f}V.")
-                return sum(valid_readings) / len(valid_readings), valid_readings, valid_adc
+            # If average is zero, all readings are zero — hardware failure, reject them all.
+            if average == 0:
+                logging.warning(f"All voltage readings for Bank {bank_id} are zero — possible hardware failure.")
+            else:
+                # Filter valid: Within 5% of average.
+                valid_readings = [r for r in readings if abs(r - average) / average <= 0.05]
+                valid_adc = [raw_values[i] for i, r in enumerate(readings) if abs(r - average) / average <= 0.05]
+                if valid_readings:
+                    # Success—average valids.
+                    logging.info(f"Voltage read successful for Bank {bank_id}: {average:.2f}V.")
+                    return sum(valid_readings) / len(valid_readings), valid_readings, valid_adc
         # Inconsistent—retry.
         logging.debug(f"Readings for Bank {bank_id} inconsistent, retrying.")
     # All retries failed.
@@ -1910,8 +1922,8 @@ def set_relay_connection(high, low, settings):
     try:
         # Validate banks unless reset.
         if high != 0 and low != 0:
-            if high > settings['num_series_banks'] or low > settings['num_series_banks']:
-                logging.warning(f"Bank {high} or {low} exceeds configured num_series_banks ({settings['num_series_banks']}). Cannot balance.")
+            if high < 1 or low < 1 or high > settings['num_series_banks'] or low > settings['num_series_banks']:
+                logging.warning(f"Bank {high} or {low} is out of range (1-{settings['num_series_banks']}). Cannot balance.")
                 return
             logging.info(f"Attempting to set GPIO relays for connection from Bank {high} to {low}")
         else:
@@ -2135,7 +2147,12 @@ def balance_battery_voltages(stdscr, high, low, settings, temps_alerts, is_heati
     # Read initial voltages.
     initial_high_v, _, _ = read_voltage_with_retry(high, settings)
     initial_low_v, _, _ = read_voltage_with_retry(low, settings)
-    # Skip if low is zero.
+    # Skip if either initial read failed (None) or low bank is zero (disconnected).
+    if initial_high_v is None or initial_low_v is None:
+        logging.warning(f"Cannot balance: initial voltage read failed (high={initial_high_v}, low={initial_low_v}). Skipping.")
+        balancing_active = False
+        web_data['balancing'] = False
+        return
     if initial_low_v == 0.0:
         logging.warning(f"Cannot balance to Bank {low} (0.00V). Skipping.")
         balancing_active = False
@@ -4267,20 +4284,21 @@ def start_web_server(settings):
     @app.route('/api/balance', methods=['POST'])
     def api_balance():
         global balancing_active
-        if balancing_active:
-            return jsonify({'success': False, 'message': 'Balancing already in progress'}), 400
-        if len(web_data['alerts']) > 0:
-            return jsonify({'success': False, 'message': 'Cannot balance with active alerts'}), 400
-        voltages = web_data['voltages']
-        if len(voltages) < 2:
-            return jsonify({'success': False, 'message': 'Not enough battery banks'}), 400
-        max_v = max(voltages)
-        min_v = min(voltages)
-        high_bank = voltages.index(max_v) + 1
-        low_bank = voltages.index(min_v) + 1
-        if max_v - min_v < settings['VoltageDifferenceToBalance']:
-            return jsonify({'success': False, 'message': 'Voltage difference too small for balancing'}), 400
-        balancing_active = True
+        with data_lock:
+            if balancing_active:
+                return jsonify({'success': False, 'message': 'Balancing already in progress'}), 400
+            if len(web_data['alerts']) > 0:
+                return jsonify({'success': False, 'message': 'Cannot balance with active alerts'}), 400
+            voltages = web_data['voltages']
+            if len(voltages) < 2:
+                return jsonify({'success': False, 'message': 'Not enough battery banks'}), 400
+            max_v = max(voltages)
+            min_v = min(voltages)
+            high_bank = voltages.index(max_v) + 1
+            low_bank = voltages.index(min_v) + 1
+            if max_v - min_v < settings['VoltageDifferenceToBalance']:
+                return jsonify({'success': False, 'message': 'Voltage difference too small for balancing'}), 400
+            balancing_active = True
         logging.info(f"Balancing initiated via web API from Bank {high_bank} to Bank {low_bank}")
         return jsonify({'success': True, 'message': f'Balancing initiated from Bank {high_bank} to Bank {low_bank}'})
     # Before each request: Auth check and CORS preflight.

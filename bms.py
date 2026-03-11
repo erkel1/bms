@@ -958,6 +958,7 @@ def load_config(data_dir):
         'low_threshold': config_parser.getfloat('Temp', 'low_threshold', fallback=0.0),  # Min safe temp °C.
         'scaling_factor': config_parser.getfloat('Temp', 'scaling_factor', fallback=100.0),  # Raw to °C conversion.
         'valid_min': config_parser.getfloat('Temp', 'valid_min', fallback=0.0),  # Minimum valid reading (below = disconnected).
+        'heating_threshold': config_parser.getfloat('Temp', 'heating_threshold', fallback=10.0),  # Temp below which balancer runs to generate heat.
         'max_retries': config_parser.getint('Temp', 'max_retries', fallback=3),  # Read retries.
         'retry_backoff_base': config_parser.getint('Temp', 'retry_backoff_base', fallback=1),  # Backoff multiplier.
         'query_delay': config_parser.getfloat('Temp', 'query_delay', fallback=0.25),  # Modbus response wait.
@@ -2811,6 +2812,7 @@ def draw_tui(stdscr, voltages, calibrated_temps, raw_temps, offsets, bank_stats,
         f"Group Lag Threshold: {settings['disconnection_lag_threshold']}°C",
         f"Cabinet Over-Temp Threshold: {settings['cabinet_over_temp_threshold']}°C",
         f"Valid Minimum Temperature: {settings['valid_min']}°C",
+        f"Heating Threshold: {settings['heating_threshold']}°C",
         f"Low Voltage Threshold per Bank: {settings['LowVoltageThresholdPerBattery']}V",
         f"High Voltage Threshold per Bank: {settings['HighVoltageThresholdPerBattery']}V",
         f"Voltage Difference to Balance: {settings['VoltageDifferenceToBalance']}V",
@@ -3985,253 +3987,321 @@ def start_web_server(settings):
         datasets_list.append("{ label: 'Median Temp °C', data: hist.map(h => h.medtemp), borderColor: 'cyan', yAxisID: 'temp' }")
         datasets_array = ',\n'.join(datasets_list)
         logging.debug(f"Constructed datasets_array: {datasets_array}")
-        # Full HTML with styles, JS for charts, dark mode, etc.
+        # Full HTML with modern design, dark-mode by default, Chart.js charts.
         html = f"""<!DOCTYPE html>
-<html lang="en">
+<html lang="en" data-theme="dark">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Battery Management System</title>
+    <title>BMS Dashboard</title>
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.5.0"></script>
     <style>
-        body {{ font-family: Arial, sans-serif; margin: 20px; transition: background-color 0.3s, color 0.3s; }}
-        body.light {{ background-color: #f5f5f5; color: #000; }}
-        body.dark {{ background-color: #1e1e1e; color: #fff; }}
-        .container {{ max-width: 1200px; margin: 0 auto; }}
-        .header {{ padding: 15px; border-radius: 5px; transition: background-color 0.3s, color 0.3s; }}
-        .header.light {{ background-color: #2c3e50; color: white; }}
-        .header.dark {{ background-color: #121212; color: #ddd; }}
-        .status-card {{ border-radius: 5px; padding: 15px; margin: 10px 0; box-shadow: 0 2px 5px rgba(0,0,0,0.1); transition: background-color 0.3s, color 0.3s; }}
-        .status-card.light {{ background-color: white; color: #000; }}
-        .status-card.dark {{ background-color: #333; color: #ddd; box-shadow: 0 2px 5px rgba(255,255,255,0.1); }}
-        .battery {{ display: inline-block; margin: 10px; padding: 10px; border: 1px solid #ddd; border-radius: 5px; transition: background-color 0.3s, border-color 0.3s; }}
-        .battery.light {{ background-color: #f9f9f9; border-color: #ddd; }}
-        .battery.dark {{ background-color: #444; border-color: #555; }}
-        .voltage {{ font-size: 1.2em; font-weight: bold; }}
-        .bank-summary {{ font-size: 0.9em; }}
-        .temperatures {{ font-size: 0.8em; max-height: 200px; overflow-y: auto; }}
-        .alert {{ color: #e74c3c; font-weight: bold; }}
-        .normal {{ color: #27ae60; }}
-        .warning {{ color: #f39c12; }}
-        .button {{ background-color: #3498db; color: white; border: none; padding: 10px 15px; border-radius: 3px; cursor: pointer; transition: background-color 0.3s; }}
-        .button:hover {{ background-color: #2980b9; }}
-        .button:disabled {{ background-color: #95a5a6; cursor: not-allowed; }}
-        .grid {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 15px; }}
-        #dark-mode-toggle {{ background-color: #555; color: white; margin-left: 10px; }}
-        #dark-mode-toggle.light {{ background-color: #555; }}
-        #dark-mode-toggle.dark {{ background-color: #aaa; color: #000; }}
+        :root {{
+            --bg:#0f172a;--bg2:#1e293b;--card:#1e293b;--card2:#263451;
+            --fg:#f1f5f9;--fg2:#94a3b8;--acc:#3b82f6;--acc2:#2563eb;
+            --ok:#22c55e;--warn:#f59e0b;--bad:#ef4444;
+            --border:#334155;--sh:0 4px 24px rgba(0,0,0,.35);--r:12px;--r2:8px;
+        }}
+        [data-theme=light] {{
+            --bg:#f1f5f9;--bg2:#e2e8f0;--card:#fff;--card2:#f8fafc;
+            --fg:#0f172a;--fg2:#64748b;--border:#cbd5e1;--sh:0 4px 12px rgba(0,0,0,.08);
+        }}
+        *{{box-sizing:border-box;margin:0;padding:0}}
+        body{{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,sans-serif;background:var(--bg);color:var(--fg);min-height:100vh;transition:background .3s,color .3s}}
+        .topbar{{background:var(--bg2);border-bottom:1px solid var(--border);padding:0 24px;display:flex;align-items:center;justify-content:space-between;height:60px;position:sticky;top:0;z-index:100}}
+        .logo{{font-size:1.15rem;font-weight:800;letter-spacing:-.5px}}.logo span{{color:var(--acc)}}
+        .badge{{display:inline-flex;align-items:center;gap:6px;padding:4px 12px;border-radius:999px;font-size:.78rem;font-weight:600}}
+        .badge.ok{{background:rgba(34,197,94,.12);color:var(--ok);border:1px solid rgba(34,197,94,.25)}}
+        .badge.bad{{background:rgba(239,68,68,.12);color:var(--bad);border:1px solid rgba(239,68,68,.25)}}
+        .badge.idle{{background:rgba(148,163,184,.1);color:var(--fg2);border:1px solid var(--border)}}
+        .dot{{width:7px;height:7px;border-radius:50%;background:currentColor;animation:pulse 2s infinite}}
+        @keyframes pulse{{0%,100%{{opacity:1;transform:scale(1)}}50%{{opacity:.5;transform:scale(.8)}}}}
+        .tr{{display:flex;align-items:center;gap:10px}}
+        .ts{{font-size:.78rem;color:var(--fg2)}}
+        .btn{{display:inline-flex;align-items:center;gap:5px;padding:7px 14px;border-radius:var(--r2);border:1px solid var(--border);background:var(--card);color:var(--fg);font-size:.82rem;font-weight:500;cursor:pointer;transition:all .15s}}
+        .btn:hover{{border-color:var(--acc);color:var(--acc);background:var(--card2)}}
+        .btn:disabled{{opacity:.35;cursor:not-allowed}}
+        .btn.p{{background:var(--acc);border-color:var(--acc);color:#fff}}.btn.p:hover{{background:var(--acc2);border-color:var(--acc2);color:#fff}}
+        .btn.d{{background:rgba(239,68,68,.1);border-color:rgba(239,68,68,.25);color:var(--bad)}}.btn.d:hover{{background:rgba(239,68,68,.2)}}
+        .wrap{{max-width:1400px;margin:0 auto;padding:22px}}
+        .mrow{{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:14px;margin-bottom:22px}}
+        .mc{{background:var(--card);border:1px solid var(--border);border-radius:var(--r);padding:18px 20px;box-shadow:var(--sh)}}
+        .ml{{font-size:.7rem;font-weight:700;text-transform:uppercase;letter-spacing:.06em;color:var(--fg2);margin-bottom:6px}}
+        .mv{{font-size:1.75rem;font-weight:800;line-height:1}}.mv.ok{{color:var(--ok)}}.mv.warn{{color:var(--warn)}}.mv.bad{{color:var(--bad)}}
+        .ms{{font-size:.75rem;color:var(--fg2);margin-top:3px}}
+        .sh{{font-size:.75rem;font-weight:700;text-transform:uppercase;letter-spacing:.07em;color:var(--fg2);margin-bottom:14px;display:flex;align-items:center;gap:8px}}
+        .sh::after{{content:"";flex:1;height:1px;background:var(--border)}}
+        .bg{{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:14px;margin-bottom:22px}}
+        .bcard{{background:var(--card);border:1px solid var(--border);border-radius:var(--r);padding:18px;box-shadow:var(--sh);transition:border-color .2s}}
+        .bcard:hover{{border-color:var(--acc)}}
+        .bhdr{{display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:14px}}
+        .bname{{font-size:.95rem;font-weight:700}}.bsub{{font-size:.7rem;color:var(--fg2);margin-top:2px}}
+        .bv{{font-size:2rem;font-weight:800;line-height:1}}.bv.ok{{color:var(--ok)}}.bv.warn{{color:var(--warn)}}.bv.bad{{color:var(--bad)}}
+        .vtrack{{height:5px;background:var(--border);border-radius:3px;margin:10px 0;overflow:hidden}}
+        .vfill{{height:100%;border-radius:3px;transition:width .5s ease}}.vfill.ok{{background:var(--ok)}}.vfill.warn{{background:var(--warn)}}.vfill.bad{{background:var(--bad)}}
+        .btemps{{display:flex;gap:14px;font-size:.78rem;color:var(--fg2);margin-bottom:10px}}
+        .btemps>span{{display:flex;flex-direction:column;gap:1px}}
+        .btemps .v{{font-size:.95rem;font-weight:600;color:var(--fg)}}.btemps .v.warn{{color:var(--warn)}}.btemps .v.bad{{color:var(--bad)}}
+        .sgrid{{display:grid;grid-template-columns:repeat(4,1fr);gap:3px}}
+        .sc{{padding:3px 5px;border-radius:4px;font-size:.68rem;text-align:center;border:1px solid transparent;background:rgba(148,163,184,.06)}}
+        .sc.ok{{border-color:rgba(34,197,94,.2);color:var(--ok)}}.sc.warm{{border-color:rgba(245,158,11,.25);color:var(--warn);background:rgba(245,158,11,.07)}}
+        .sc.hot{{border-color:rgba(239,68,68,.3);color:var(--bad);background:rgba(239,68,68,.08)}}.sc.null{{color:var(--fg2);font-style:italic}}
+        .two{{display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-bottom:22px}}
+        @media(max-width:860px){{.two{{grid-template-columns:1fr}}}}
+        .card{{background:var(--card);border:1px solid var(--border);border-radius:var(--r);padding:18px;box-shadow:var(--sh)}}
+        .alist{{display:flex;flex-direction:column;gap:7px}}
+        .ai{{display:flex;align-items:flex-start;gap:9px;padding:9px 13px;border-radius:var(--r2);font-size:.83rem;background:rgba(239,68,68,.09);border:1px solid rgba(239,68,68,.2);color:#fca5a5}}
+        .noa{{display:flex;align-items:center;gap:7px;padding:10px 14px;border-radius:var(--r2);background:rgba(34,197,94,.07);border:1px solid rgba(34,197,94,.18);color:var(--ok);font-size:.83rem;font-weight:500}}
+        .acts{{display:flex;gap:10px;flex-wrap:wrap;margin-top:14px}}
+        .ct{{width:100%;border-collapse:collapse;font-size:.82rem}}
+        .ct th{{text-align:left;padding:7px 10px;border-bottom:2px solid var(--border);color:var(--fg2);font-weight:600;font-size:.7rem;text-transform:uppercase;letter-spacing:.04em}}
+        .ct td{{padding:7px 10px;border-bottom:1px solid var(--border)}}.ct tr:last-child td{{border-bottom:none}}.ct tr:hover td{{background:rgba(148,163,184,.04)}}
+        .rbar{{display:flex;align-items:center;gap:7px}}.rmini{{flex:1;height:4px;background:var(--border);border-radius:2px;overflow:hidden}}.rfill{{height:100%;border-radius:2px}}
+        .cbox{{position:relative;height:280px}}
+        .fab{{position:fixed;bottom:18px;right:18px;width:42px;height:42px;display:flex;align-items:center;justify-content:center;cursor:pointer;z-index:200}}
+        .ring{{position:absolute;inset:0}}.rc{{font-size:.68rem;font-weight:700;color:var(--fg2)}}
+        .spin{{display:inline-block;width:7px;height:7px;border-radius:50%;background:var(--acc);animation:pulse 1s infinite}}
     </style>
 </head>
-<body class="light">
-    <div class="container">
-        <div class="header light">
-            <h1>Battery Management System</h1>
-            <p>Status: <span id="system-status">Loading...</span></p>
-            <p>Last Update: <span id="last-update">-</span></p>
-            <button id="dark-mode-toggle" class="button">Dark Mode</button>
+<body>
+<div class="topbar">
+    <div class="tr">
+        <div class="logo">BMS <span>Dashboard</span></div>
+        <span class="badge idle" id="sbadge"><span class="dot"></span><span id="stext">Connecting…</span></span>
+    </div>
+    <div class="tr">
+        <span class="ts" id="lupd">—</span>
+        <button class="btn" id="theme-btn">☀/☾</button>
+        <button class="btn p" id="refresh-btn">↻ Refresh</button>
+    </div>
+</div>
+<div class="wrap">
+    <div class="mrow">
+        <div class="mc"><div class="ml">Total Voltage</div><div class="mv ok" id="tv">—</div><div class="ms">All banks combined</div></div>
+        <div class="mc"><div class="ml">Balancing</div><div class="mv ok" id="bm">—</div><div class="ms" id="bms2">—</div></div>
+        <div class="mc"><div class="ml">Active Alerts</div><div class="mv ok" id="ac">—</div><div class="ms">System health</div></div>
+        <div class="mc"><div class="ml">Avg Temperature</div><div class="mv ok" id="at">—</div><div class="ms">All sensors</div></div>
+    </div>
+    <div class="sh">Battery Banks</div>
+    <div class="bg" id="battery-container"></div>
+    <div class="two">
+        <div class="card">
+            <div class="sh">Alerts</div>
+            <div id="alerts-container"><div class="noa">⟳ Loading…</div></div>
+            <div class="acts"><button class="btn d" id="balance-btn" disabled>⚡ Balance Now</button></div>
         </div>
-        <div class="status-card light">
-            <h2>System Information</h2>
-            <p>Total Voltage: <span id="total-voltage">-</span></p>
-            <p>Balancing: <span id="balancing-status">No</span></p>
-        </div>
-        <div class="status-card light">
-            <h2>Actions</h2>
-            <button id="refresh-btn" class="button">Refresh</button>
-            <button id="balance-btn" class="button" disabled>Balance Now</button>
-        </div>
-        <div class="status-card light">
-            <h2>Alerts</h2>
-            <div id="alerts-container"></div>
-        </div>
-        <div class="status-card light">
-            <h2>Battery Banks</h2>
-            <div id="battery-container" class="grid"></div>
-        </div>
-        <div class="status-card light">
-            <h2>Communication Health</h2>
-            <div id="comm-stats-container"></div>
-        </div>
-        <div class="status-card light">
-            <h2>Time-Series Charts</h2>
-            <canvas id="bmsChart" width="800" height="400"></canvas>
+        <div class="card">
+            <div class="sh">Communication Health</div>
+            <div id="comm-stats-container"><p style="color:var(--fg2);font-size:.83rem">Loading…</p></div>
         </div>
     </div>
-    <script>
-        const body = document.body;
-        const header = document.querySelector('.header');
-        const statusCards = document.querySelectorAll('.status-card');
-        const darkModeToggle = document.getElementById('dark-mode-toggle');
-        darkModeToggle.addEventListener('click', () => {{
-            if (body.classList.contains('light')) {{
-                body.classList.remove('light');
-                body.classList.add('dark');
-                header.classList.remove('light');
-                header.classList.add('dark');
-                statusCards.forEach(card => {{
-                    card.classList.remove('light');
-                    card.classList.add('dark');
-                }});
-                darkModeToggle.textContent = 'Light Mode';
+    <div class="card" style="margin-bottom:24px">
+        <div class="sh">Voltage &amp; Temperature History</div>
+        <div class="cbox"><canvas id="bmsChart"></canvas></div>
+    </div>
+</div>
+<div class="fab" id="fab" title="Auto-refresh">
+    <svg class="ring" viewBox="0 0 42 42">
+        <circle cx="21" cy="21" r="17" fill="none" stroke="var(--border)" stroke-width="3"/>
+        <circle id="rarc" cx="21" cy="21" r="17" fill="none" stroke="var(--acc)" stroke-width="3"
+            stroke-dasharray="106.8" stroke-dashoffset="106.8" stroke-linecap="round" transform="rotate(-90 21 21)"/>
+    </svg>
+    <span class="rc" id="rcd">5</span>
+</div>
+<script>
+    const docEl = document.documentElement;
+    const storedTheme = localStorage.getItem('bms-t') || 'dark';
+    docEl.setAttribute('data-theme', storedTheme);
+    document.getElementById('theme-btn').addEventListener('click', () => {{
+        const t = docEl.getAttribute('data-theme') === 'dark' ? 'light' : 'dark';
+        docEl.setAttribute('data-theme', t);
+        localStorage.setItem('bms-t', t);
+        if (myChart) {{ applyChartTheme(); myChart.update(); }}
+    }});
+    function isDark() {{ return docEl.getAttribute('data-theme') === 'dark'; }}
+    function chartColors() {{
+        return {{
+            text: isDark() ? '#94a3b8' : '#64748b',
+            grid: isDark() ? 'rgba(51,65,85,.8)' : 'rgba(203,213,225,.8)',
+            tip_bg: isDark() ? '#1e293b' : '#fff',
+            tip_border: isDark() ? '#334155' : '#cbd5e1',
+            tip_title: isDark() ? '#f1f5f9' : '#0f172a',
+            tip_body: isDark() ? '#94a3b8' : '#64748b',
+        }};
+    }}
+    function applyChartTheme() {{
+        if (!myChart) return;
+        const c = chartColors();
+        myChart.options.scales.x.ticks.color = c.text;
+        myChart.options.scales.x.grid.color = c.grid;
+        myChart.options.scales.y.ticks.color = c.text;
+        myChart.options.scales.y.grid.color = c.grid;
+        myChart.options.scales.y.title.color = c.text;
+        myChart.options.scales.temp.ticks.color = c.text;
+        myChart.options.scales.temp.title.color = c.text;
+        myChart.options.plugins.legend.labels.color = c.text;
+        myChart.options.plugins.tooltip.backgroundColor = c.tip_bg;
+        myChart.options.plugins.tooltip.borderColor = c.tip_border;
+        myChart.options.plugins.tooltip.titleColor = c.tip_title;
+        myChart.options.plugins.tooltip.bodyColor = c.tip_body;
+    }}
+
+    let rIn = 5;
+    const arc = document.getElementById('rarc');
+    const rcdEl = document.getElementById('rcd');
+    const C = 2 * Math.PI * 17;
+    function updArc() {{ arc.setAttribute('stroke-dashoffset', C * (rIn/5)); rcdEl.textContent = rIn; }}
+    updArc();
+    setInterval(() => {{ rIn--; if (rIn <= 0) {{ rIn = 5; updateStatus(); }} updArc(); }}, 1000);
+
+    function vcls(v, lo, hi) {{ return (v===0||v===null)?'bad':((v>hi||v<lo)?'warn':'ok'); }}
+    function tcls(t, lo, hi) {{ return t===null?'null':(t>hi?'hot':(t>hi*.88?'warm':'ok')); }}
+
+    function updateStatus() {{
+        fetch('/api/status').then(r=>r.json()).then(data => {{
+            const ok = data.system_status !== 'Alert';
+            const badge = document.getElementById('sbadge');
+            badge.className = 'badge ' + (ok ? 'ok' : 'bad');
+            document.getElementById('stext').textContent = ok ? '✓ Running' : '⚠ Alert';
+            document.getElementById('lupd').textContent = 'Updated ' + new Date(data.last_update*1000).toLocaleTimeString();
+
+            const tvEl = document.getElementById('tv');
+            tvEl.textContent = data.total_voltage.toFixed(2) + 'V';
+            tvEl.className = 'mv ' + (ok ? 'ok' : 'warn');
+
+            const bmEl = document.getElementById('bm');
+            const bm2 = document.getElementById('bms2');
+            if (data.balancing) {{
+                bmEl.innerHTML = '<span class="spin"></span> Active';
+                bmEl.style.color = 'var(--acc)';
+                bm2.textContent = 'Charge transfer in progress';
             }} else {{
-                body.classList.remove('dark');
-                body.classList.add('light');
-                header.classList.remove('dark');
-                header.classList.add('light');
-                statusCards.forEach(card => {{
-                    card.classList.remove('dark');
-                    card.classList.add('light');
-                }});
-                darkModeToggle.textContent = 'Dark Mode';
+                bmEl.innerHTML = 'Idle';
+                bmEl.className = 'mv ok';
+                bmEl.style.color = '';
+                bm2.textContent = 'No transfer needed';
             }}
+
+            const acEl = document.getElementById('ac');
+            acEl.textContent = data.alerts.length;
+            acEl.className = 'mv ' + (data.alerts.length > 0 ? 'bad' : 'ok');
+
+            const vt = data.temperatures.filter(t=>t!==null);
+            const avg = vt.length ? vt.reduce((a,b)=>a+b,0)/vt.length : null;
+            const atEl = document.getElementById('at');
+            if (avg !== null) {{ atEl.textContent = avg.toFixed(1)+'°C'; atEl.className = 'mv '+tcls(avg,data.low_threshold,data.high_threshold); }}
+
+            const lo = data.low_voltage_threshold, hi = data.high_voltage_threshold;
+            const container = document.getElementById('battery-container');
+            container.innerHTML = '';
+            const spb = data.sensors_per_battery;
+            const spbk = Math.floor(data.temperatures.length / data.voltages.length);
+            data.voltages.forEach((v, idx) => {{
+                const s = data.bank_summaries[idx];
+                const vc = vcls(v, lo, hi);
+                const pct = v > 0 ? Math.min(100, Math.max(0, ((v-lo)/(hi-lo))*100)) : 0;
+                const sensors = data.temperatures.slice(idx*spbk, (idx+1)*spbk);
+                const chips = sensors.map((t,li) => {{
+                    const gi = idx*spbk+li;
+                    const bat = Math.floor(gi/spb)+1;
+                    const ch = (gi%spb)+1;
+                    const tc = tcls(t, data.low_threshold, data.high_threshold);
+                    return `<div class="sc ${{tc}}" title="Bat ${{bat}} C${{ch}}">${{t!==null?t.toFixed(1)+'°':'N/A'}}</div>`;
+                }}).join('');
+                const mc = tcls(s.median, data.low_threshold, data.high_threshold);
+                container.innerHTML += `<div class="bcard">
+                    <div class="bhdr">
+                        <div><div class="bname">Bank ${{idx+1}}</div><div class="bsub">${{spbk}} sensors</div></div>
+                        <div class="bv ${{vc}}">${{v&&v>0?v.toFixed(2)+'V':'N/A'}}</div>
+                    </div>
+                    <div class="vtrack"><div class="vfill ${{vc}}" style="width:${{pct}}%"></div></div>
+                    <div class="btemps">
+                        <span><span>MED</span><span class="v ${{mc}}">${{s.median.toFixed(1)}}°C</span></span>
+                        <span><span>MIN</span><span class="v">${{s.min.toFixed(1)}}°C</span></span>
+                        <span><span>MAX</span><span class="v ${{s.max>data.high_threshold?'bad':''}}">${{s.max.toFixed(1)}}°C</span></span>
+                        <span><span>INV</span><span class="v ${{s.invalid>0?'warn':''}}">${{s.invalid}}</span></span>
+                    </div>
+                    <div class="sgrid">${{chips}}</div>
+                </div>`;
+            }});
+
+            const ad = document.getElementById('alerts-container');
+            if (data.alerts.length > 0) {{
+                ad.innerHTML = '<div class="alist">'+data.alerts.map(a=>`<div class="ai">⚠ ${{a}}</div>`).join('')+'</div>';
+            }} else {{
+                ad.innerHTML = '<div class="noa">✓ All systems normal</div>';
+            }}
+            document.getElementById('balance-btn').disabled = data.balancing || data.alerts.length > 0;
+        }}).catch(() => {{
+            document.getElementById('sbadge').className = 'badge bad';
+            document.getElementById('stext').textContent = '✗ Connection Error';
         }});
-        function updateStatus() {{
-            fetch('/api/status')
-                .then(response => response.json())
-                .then(data => {{
-                    document.getElementById('system-status').textContent = data.system_status;
-                    document.getElementById('last-update').textContent = new Date(data.last_update * 1000).toLocaleString();
-                    document.getElementById('total-voltage').textContent = data.total_voltage.toFixed(2) + 'V';
-                    document.getElementById('balancing-status').textContent = data.balancing ? 'Yes' : 'No';
-                    const batteryContainer = document.getElementById('battery-container');
-                    batteryContainer.innerHTML = '';
-                    const sensorsPerBank = data.temperatures.length / data.voltages.length;
-                    const sensorsPerBattery = data.sensors_per_battery;
-                    data.voltages.forEach((voltage, index) => {{
-                        const summary = data.bank_summaries[index];
-                        const bankDiv = document.createElement('div');
-                        bankDiv.className = 'battery';
-                        bankDiv.innerHTML = `
-                            <h3>Bank ${{index + 1}}</h3>
-                            <p class="voltage ${{voltage === 0 || voltage === null ? 'alert' : (voltage > data.high_voltage_threshold || voltage < data.low_voltage_threshold) ? 'warning' : 'normal'}}">
-                                ${{voltage !== null ? voltage.toFixed(2) : 'N/A'}}V
-                            </p>
-                            <div class="bank-summary">
-                                <p class="temperature ${{summary.median > data.high_threshold || summary.median < data.low_threshold || summary.invalid > 0 ? 'warning' : 'normal'}}">
-                                    Median: ${{summary.median.toFixed(1)}}°C Min: ${{summary.min.toFixed(1)}}°C Max: ${{summary.max.toFixed(1)}}°C Invalid: ${{summary.invalid}}
-                                </p>
-                            </div>
-                            <div class="temperatures">
-                                ${{data.temperatures.slice(index * sensorsPerBank, (index + 1) * sensorsPerBank).map((temp, localIndex) => {{
-                                    const globalIndex = index * sensorsPerBank + localIndex;
-                                    const batId = Math.floor(globalIndex / sensorsPerBattery) + 1;
-                                    const localCh = (globalIndex % sensorsPerBattery) + 1;
-                                    return `<p class="temperature ${{temp === null ? 'alert' : (temp > data.high_threshold || temp < data.low_threshold) ? 'warning' : 'normal'}}">
-                                        Bat ${{batId}} Local C${{localCh}}: ${{temp !== null ? temp.toFixed(1) + '°C' : 'N/A'}}
-                                    </p>`;
-                                }}).join('')}}
-                            </div>
-                        `;
-                        batteryContainer.appendChild(bankDiv);
-                    }});
-                    const alertsContainer = document.getElementById('alerts-container');
-                    if (data.alerts.length > 0) {{
-                        alertsContainer.innerHTML = data.alerts.map(alert => `<p class="alert">${{alert}}</p>`).join('');
-                    }} else {{
-                        alertsContainer.innerHTML = '<p class="normal">No alerts</p>';
-                    }}
-                    const balanceBtn = document.getElementById('balance-btn');
-                    balanceBtn.disabled = data.balancing || data.alerts.length > 0;
-                }})
-                .catch(error => {{
-                    console.error('Error fetching status:', error);
-                    document.getElementById('system-status').textContent = 'Error: ' + error.message;
-                }});
-        }}
-        let myChart = null;
-        function updateChart() {{
-            fetch('/api/history')
-                .then(response => response.json())
-                .then(data => {{
-                    const hist = data.history;
-                    const labels = hist.map(h => new Date(h.time * 1000).toLocaleTimeString());
-                    const datasets = [
-                        {datasets_array}
-                    ];
-                    const ctx = document.getElementById('bmsChart').getContext('2d');
-                    if (hist.length === 0) {{
-                        ctx.fillStyle = 'red';
-                        ctx.fillText('No history data available', 10, 50);
-                        return;
-                    }}
-                    if (myChart) {{
-                        myChart.destroy();
-                    }}
-                    myChart = new Chart(ctx, {{
-                        type: 'line',
-                        data: {{ labels, datasets }},
-                        options: {{
-                            scales: {{
-                                y: {{ type: 'linear', position: 'left', title: {{ display: true, text: 'Voltage (V)' }} }},
-                                temp: {{ type: 'linear', position: 'right', title: {{ display: true, text: 'Temp (°C)' }}, grid: {{ drawOnChartArea: false }} }}
-                            }}
-                        }}
-                    }});
-                }})
-                .catch(error => console.error('Error fetching history:', error));
-        }}
-        function initiateBalance() {{
-            fetch('/api/balance', {{ method: 'POST' }})
-                .then(response => response.json())
-                .then(data => {{
-                    if (data.success) {{
-                        alert('Balancing initiated');
-                    }} else {{
-                        alert('Error: ' + data.message);
-                    }}
-                }})
-                .catch(error => {{
-                    console.error('Error initiating balance:', error);
-                    alert('Error initiating balance');
-                }});
-        }}
-        document.getElementById('refresh-btn').addEventListener('click', updateStatus);
-        document.getElementById('balance-btn').addEventListener('click', initiateBalance);
-        updateStatus();
-        updateChart();
-        setInterval(updateStatus, 5000);
-        setInterval(updateChart, 60000);
+    }}
 
-        function updateCommStats() {{
-            fetch('/api/comm_stats')
-                .then(function(response) {{ return response.json(); }})
-                .then(function(data) {{
-                    var container = document.getElementById('comm-stats-container');
-                    if (!container) return;
-                    
-                    if (data.slaves && data.slaves.length > 0) {{
-                        var html = '<table style="width:100%; border-collapse: collapse;">';
-                        html += '<tr style="background:#444; color:#fff;"><th>Slave</th><th>Success</th><th>Fail</th><th>Rate</th><th>Last Error</th></tr>';
-                        data.slaves.forEach(function(slave, index) {{
-                            var rowBg = index % 2 === 0 ? '#f9f9f9' : '#eee';
-                            var rateColor = slave.success_rate >= 80 ? 'green' : (slave.success_rate >= 50 ? 'orange' : 'red');
-                            var lastError = slave.last_error_type ? slave.last_error_type : (slave.last_error ? new Date(slave.last_error * 1000).toLocaleString() : 'None');
-                            html += '<tr style="background:' + rowBg + ';">';
-                            html += '<td style="padding:5px;">S' + slave.slave_addr + '</td>';
-                            html += '<td style="padding:5px;">' + slave.success_count + '</td>';
-                            html += '<td style="padding:5px;">' + slave.fail_count + '</td>';
-                            html += '<td style="padding:5px; color:' + rateColor + '; font-weight:bold;">' + slave.success_rate + '%</td>';
-                            html += '<td style="padding:5px;">' + lastError + '</td>';
-                            html += '</tr>';
-                        }});
-                        html += '</table>';
-                        html += '<p style="margin-top:10px; font-size:0.9em;">Total: ' + data.total_success + ' success, ' + data.total_fail + ' fail</p>';
-                        container.innerHTML = html;
-                    }} else {{
-                        container.innerHTML = '<p>No communication data available</p>';
+    let myChart = null;
+    function updateChart() {{
+        fetch('/api/history').then(r=>r.json()).then(data => {{
+            const hist = data.history;
+            if (!hist || !hist.length) return;
+            const c = chartColors();
+            const labels = hist.map(h => new Date(h.time*1000).toLocaleTimeString());
+            const datasets = [
+                {datasets_array}
+            ];
+            const ctx = document.getElementById('bmsChart').getContext('2d');
+            if (myChart) myChart.destroy();
+            myChart = new Chart(ctx, {{
+                type: 'line',
+                data: {{ labels, datasets }},
+                options: {{
+                    responsive: true, maintainAspectRatio: false,
+                    animation: {{ duration: 400 }},
+                    interaction: {{ mode: 'index', intersect: false }},
+                    plugins: {{
+                        legend: {{ labels: {{ color: c.text, usePointStyle: true, pointStyle: 'circle', padding: 14 }} }},
+                        tooltip: {{ backgroundColor: c.tip_bg, borderColor: c.tip_border, borderWidth: 1, titleColor: c.tip_title, bodyColor: c.tip_body }}
+                    }},
+                    scales: {{
+                        x: {{ ticks: {{ color: c.text, maxTicksLimit: 8 }}, grid: {{ color: c.grid }} }},
+                        y: {{ type: 'linear', position: 'left', title: {{ display: true, text: 'Voltage (V)', color: c.text }}, ticks: {{ color: c.text }}, grid: {{ color: c.grid }} }},
+                        temp: {{ type: 'linear', position: 'right', title: {{ display: true, text: 'Temp (°C)', color: c.text }}, ticks: {{ color: c.text }}, grid: {{ drawOnChartArea: false }} }}
                     }}
-                }})
-                .catch(function(error) {{
-                    console.error('Error fetching comm stats:', error);
-                    var container = document.getElementById('comm-stats-container');
-                    if (container) {{
-                        container.innerHTML = '<p class="alert">Error loading communication statistics</p>';
-                    }}
-                }});
-        }}
+                }}
+            }});
+        }}).catch(e => console.error('History error:', e));
+    }}
 
-        setInterval(updateCommStats, 10000);
-    </script>
+    function updateCommStats() {{
+        fetch('/api/comm_stats').then(r=>r.json()).then(data => {{
+            const el = document.getElementById('comm-stats-container');
+            if (!data.slaves || !data.slaves.length) {{ el.innerHTML = '<p style="color:var(--fg2);font-size:.83rem">No data</p>'; return; }}
+            let h = '<table class="ct"><thead><tr><th>Slave</th><th>OK</th><th>Fail</th><th>Rate</th><th>Last Error</th></tr></thead><tbody>';
+            data.slaves.forEach(s => {{
+                const r = s.success_rate;
+                const rc = r>=80?'var(--ok)':r>=50?'var(--warn)':'var(--bad)';
+                const err = s.last_error_type || (s.last_error ? new Date(s.last_error*1000).toLocaleTimeString() : '—');
+                h += `<tr><td style="font-weight:600">S${{s.slave_addr}}</td><td style="color:var(--ok)">${{s.success_count}}</td><td style="color:var(--bad)">${{s.fail_count}}</td>
+                    <td><div class="rbar"><div class="rmini"><div class="rfill" style="width:${{r}}%;background:${{rc}}"></div></div><span style="color:${{rc}};font-weight:600;font-size:.75rem">${{r}}%</span></div></td>
+                    <td style="color:var(--fg2);font-size:.75rem">${{err}}</td></tr>`;
+            }});
+            h += `</tbody></table><div style="margin-top:8px;font-size:.75rem;color:var(--fg2)">Total: ${{data.total_success}} ok / ${{data.total_fail}} fail</div>`;
+            el.innerHTML = h;
+        }}).catch(() => {{ document.getElementById('comm-stats-container').innerHTML = '<p style="color:var(--bad);font-size:.83rem">Failed to load</p>'; }});
+    }}
+
+    function initiateBalance() {{
+        fetch('/api/balance', {{method:'POST'}}).then(r=>r.json())
+            .then(d => alert((d.success?'✓ ':'⚠ ')+d.message))
+            .catch(e => alert('Error: '+e.message));
+    }}
+
+    document.getElementById('refresh-btn').addEventListener('click', () => {{ rIn=5; updateStatus(); }});
+    document.getElementById('balance-btn').addEventListener('click', initiateBalance);
+    document.getElementById('fab').addEventListener('click', () => {{ rIn=5; updateStatus(); }});
+    updateStatus(); updateChart(); updateCommStats();
+    setInterval(updateCommStats, 10000);
+    setInterval(updateChart, 60000);
+</script>
 </body>
 </html>"""
         return html
@@ -4543,7 +4613,7 @@ def main(stdscr):
             high_b = battery_voltages.index(max_v) + 1 # Bank number with highest voltage
             low_b = battery_voltages.index(min_v) + 1 # Bank number with lowest voltage
             current_time = time.time()
-            any_low_temp = any(t is not None and t < 10 for t in calibrated_temps)
+            any_low_temp = any(t is not None and t < settings["heating_threshold"] for t in calibrated_temps)
             min_src_v = settings.get('min_balance_source_voltage', 17.0)
             # Guard: Dont balance a bank to itself
             if high_b == low_b:

@@ -3994,121 +3994,174 @@ def start_web_server(settings):
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>BMS Dashboard</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.5.0"></script>
     <style>
         :root {{
-            --bg:#0f172a;--bg2:#1e293b;--card:#1e293b;--card2:#263451;
-            --fg:#f1f5f9;--fg2:#94a3b8;--acc:#3b82f6;--acc2:#2563eb;
-            --ok:#22c55e;--warn:#f59e0b;--bad:#ef4444;
-            --border:#334155;--sh:0 4px 24px rgba(0,0,0,.35);--r:12px;--r2:8px;
+            --bg:#080f1a;--bg2:#0d1829;--card:#111d2e;--card2:#16243a;
+            --fg:#e2e8f0;--fg2:#7a8ba0;--fg3:#4a5c6e;
+            --acc:#3b82f6;--acc2:#2563eb;--acc-glow:rgba(59,130,246,.25);
+            --ok:#22c55e;--ok-glow:rgba(34,197,94,.2);
+            --warn:#f59e0b;--warn-glow:rgba(245,158,11,.2);
+            --bad:#ef4444;--bad-glow:rgba(239,68,68,.2);
+            --border:#1e3044;--border2:#243650;
+            --sh:0 4px 24px rgba(0,0,0,.5);--sh2:0 8px 40px rgba(0,0,0,.6);
+            --r:14px;--r2:9px;--r3:6px;
         }}
         [data-theme=light] {{
-            --bg:#f1f5f9;--bg2:#e2e8f0;--card:#fff;--card2:#f8fafc;
-            --fg:#0f172a;--fg2:#64748b;--border:#cbd5e1;--sh:0 4px 12px rgba(0,0,0,.08);
+            --bg:#f0f4f8;--bg2:#e4ecf4;--card:#ffffff;--card2:#f4f8fc;
+            --fg:#0f1e2d;--fg2:#4a6072;--fg3:#8ba0b0;
+            --acc:#2563eb;--acc2:#1d4ed8;--acc-glow:rgba(37,99,235,.15);
+            --ok:#16a34a;--ok-glow:rgba(22,163,74,.12);
+            --warn:#d97706;--warn-glow:rgba(217,119,6,.12);
+            --bad:#dc2626;--bad-glow:rgba(220,38,38,.12);
+            --border:#d0dae4;--border2:#c0d0de;
+            --sh:0 2px 16px rgba(0,0,0,.08);--sh2:0 4px 24px rgba(0,0,0,.1);
         }}
         *{{box-sizing:border-box;margin:0;padding:0}}
-        body{{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,sans-serif;background:var(--bg);color:var(--fg);min-height:100vh;transition:background .3s,color .3s}}
-        .topbar{{background:var(--bg2);border-bottom:1px solid var(--border);padding:0 24px;display:flex;align-items:center;justify-content:space-between;height:60px;position:sticky;top:0;z-index:100}}
-        .logo{{font-size:1.15rem;font-weight:800;letter-spacing:-.5px}}.logo span{{color:var(--acc)}}
-        .badge{{display:inline-flex;align-items:center;gap:6px;padding:4px 12px;border-radius:999px;font-size:.78rem;font-weight:600}}
-        .badge.ok{{background:rgba(34,197,94,.12);color:var(--ok);border:1px solid rgba(34,197,94,.25)}}
-        .badge.bad{{background:rgba(239,68,68,.12);color:var(--bad);border:1px solid rgba(239,68,68,.25)}}
-        .badge.idle{{background:rgba(148,163,184,.1);color:var(--fg2);border:1px solid var(--border)}}
-        .dot{{width:7px;height:7px;border-radius:50%;background:currentColor;animation:pulse 2s infinite}}
-        @keyframes pulse{{0%,100%{{opacity:1;transform:scale(1)}}50%{{opacity:.5;transform:scale(.8)}}}}
-        .tr{{display:flex;align-items:center;gap:10px}}
-        .ts{{font-size:.78rem;color:var(--fg2)}}
-        .btn{{display:inline-flex;align-items:center;gap:5px;padding:7px 14px;border-radius:var(--r2);border:1px solid var(--border);background:var(--card);color:var(--fg);font-size:.82rem;font-weight:500;cursor:pointer;transition:all .15s}}
-        .btn:hover{{border-color:var(--acc);color:var(--acc);background:var(--card2)}}
-        .btn:disabled{{opacity:.35;cursor:not-allowed}}
-        .btn.p{{background:var(--acc);border-color:var(--acc);color:#fff}}.btn.p:hover{{background:var(--acc2);border-color:var(--acc2);color:#fff}}
-        .btn.d{{background:rgba(239,68,68,.1);border-color:rgba(239,68,68,.25);color:var(--bad)}}.btn.d:hover{{background:rgba(239,68,68,.2)}}
-        .wrap{{max-width:1400px;margin:0 auto;padding:22px}}
-        .mrow{{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:14px;margin-bottom:22px}}
-        .mc{{background:var(--card);border:1px solid var(--border);border-radius:var(--r);padding:18px 20px;box-shadow:var(--sh)}}
-        .ml{{font-size:.7rem;font-weight:700;text-transform:uppercase;letter-spacing:.06em;color:var(--fg2);margin-bottom:6px}}
-        .mv{{font-size:1.75rem;font-weight:800;line-height:1}}.mv.ok{{color:var(--ok)}}.mv.warn{{color:var(--warn)}}.mv.bad{{color:var(--bad)}}
-        .ms{{font-size:.75rem;color:var(--fg2);margin-top:3px}}
-        .sh{{font-size:.75rem;font-weight:700;text-transform:uppercase;letter-spacing:.07em;color:var(--fg2);margin-bottom:14px;display:flex;align-items:center;gap:8px}}
+        html{{scroll-behavior:smooth}}
+        body{{font-family:'Inter',system-ui,-apple-system,sans-serif;background:var(--bg);color:var(--fg);min-height:100vh;line-height:1.5;transition:background .3s,color .3s}}
+        /* ── Topbar ── */
+        .topbar{{background:var(--bg2);border-bottom:1px solid var(--border);padding:0 28px;display:flex;align-items:center;justify-content:space-between;height:62px;position:sticky;top:0;z-index:200;backdrop-filter:blur(12px)}}
+        .logo{{display:flex;align-items:center;gap:10px;font-size:1.05rem;font-weight:800;letter-spacing:-.3px}}
+        .logo-icon{{width:30px;height:30px;background:linear-gradient(135deg,var(--acc),#7c3aed);border-radius:8px;display:flex;align-items:center;justify-content:center;font-size:.9rem;box-shadow:0 0 12px var(--acc-glow)}}
+        .badge{{display:inline-flex;align-items:center;gap:6px;padding:5px 13px;border-radius:999px;font-size:.75rem;font-weight:600;letter-spacing:.01em}}
+        .badge.ok{{background:var(--ok-glow);color:var(--ok);border:1px solid rgba(34,197,94,.3)}}
+        .badge.bad{{background:var(--bad-glow);color:var(--bad);border:1px solid rgba(239,68,68,.3)}}
+        .badge.idle{{background:rgba(122,139,160,.1);color:var(--fg2);border:1px solid var(--border)}}
+        .dot{{width:7px;height:7px;border-radius:50%;background:currentColor;flex-shrink:0}}
+        .dot.pulse{{animation:pulse 2s infinite}}
+        @keyframes pulse{{0%,100%{{opacity:1;transform:scale(1)}}50%{{opacity:.4;transform:scale(.75)}}}}
+        .topbar-r{{display:flex;align-items:center;gap:8px}}
+        .ts{{font-size:.76rem;color:var(--fg2);white-space:nowrap}}
+        .btn{{display:inline-flex;align-items:center;gap:5px;padding:7px 14px;border-radius:var(--r3);border:1px solid var(--border);background:transparent;color:var(--fg2);font-size:.8rem;font-weight:500;cursor:pointer;transition:all .15s;font-family:inherit}}
+        .btn:hover{{border-color:var(--acc);color:var(--acc)}}
+        .btn:disabled{{opacity:.3;cursor:not-allowed}}
+        .btn.p{{background:var(--acc);border-color:var(--acc);color:#fff;box-shadow:0 0 12px var(--acc-glow)}}.btn.p:hover{{background:var(--acc2);border-color:var(--acc2)}}
+        .btn.danger{{background:var(--bad-glow);border-color:rgba(239,68,68,.3);color:var(--bad)}}.btn.danger:hover{{background:rgba(239,68,68,.2)}}
+        /* ── Layout ── */
+        .wrap{{max-width:1440px;margin:0 auto;padding:24px 28px}}
+        @media(max-width:768px){{.wrap{{padding:16px}}}}
+        /* ── Section header ── */
+        .sh{{display:flex;align-items:center;gap:10px;font-size:.7rem;font-weight:700;text-transform:uppercase;letter-spacing:.1em;color:var(--fg3);margin-bottom:16px}}
         .sh::after{{content:"";flex:1;height:1px;background:var(--border)}}
-        .bg{{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:14px;margin-bottom:22px}}
-        .bcard{{background:var(--card);border:1px solid var(--border);border-radius:var(--r);padding:18px;box-shadow:var(--sh);transition:border-color .2s}}
-        .bcard:hover{{border-color:var(--acc)}}
-        .bhdr{{display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:14px}}
-        .bname{{font-size:.95rem;font-weight:700}}.bsub{{font-size:.7rem;color:var(--fg2);margin-top:2px}}
-        .bv{{font-size:2rem;font-weight:800;line-height:1}}.bv.ok{{color:var(--ok)}}.bv.warn{{color:var(--warn)}}.bv.bad{{color:var(--bad)}}
-        .vtrack{{height:5px;background:var(--border);border-radius:3px;margin:10px 0;overflow:hidden}}
-        .vfill{{height:100%;border-radius:3px;transition:width .5s ease}}.vfill.ok{{background:var(--ok)}}.vfill.warn{{background:var(--warn)}}.vfill.bad{{background:var(--bad)}}
-        .btemps{{display:flex;gap:14px;font-size:.78rem;color:var(--fg2);margin-bottom:10px}}
-        .btemps>span{{display:flex;flex-direction:column;gap:1px}}
-        .btemps .v{{font-size:.95rem;font-weight:600;color:var(--fg)}}.btemps .v.warn{{color:var(--warn)}}.btemps .v.bad{{color:var(--bad)}}
-        .sgrid{{display:grid;grid-template-columns:repeat(4,1fr);gap:3px}}
-        .sc{{padding:3px 5px;border-radius:4px;font-size:.68rem;text-align:center;border:1px solid transparent;background:rgba(148,163,184,.06)}}
-        .sc.ok{{border-color:rgba(34,197,94,.2);color:var(--ok)}}.sc.warm{{border-color:rgba(245,158,11,.25);color:var(--warn);background:rgba(245,158,11,.07)}}
-        .sc.hot{{border-color:rgba(239,68,68,.3);color:var(--bad);background:rgba(239,68,68,.08)}}.sc.null{{color:var(--fg2);font-style:italic}}
-        .two{{display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-bottom:22px}}
-        @media(max-width:860px){{.two{{grid-template-columns:1fr}}}}
-        .card{{background:var(--card);border:1px solid var(--border);border-radius:var(--r);padding:18px;box-shadow:var(--sh)}}
-        .alist{{display:flex;flex-direction:column;gap:7px}}
-        .ai{{display:flex;align-items:flex-start;gap:9px;padding:9px 13px;border-radius:var(--r2);font-size:.83rem;background:rgba(239,68,68,.09);border:1px solid rgba(239,68,68,.2);color:#fca5a5}}
-        .noa{{display:flex;align-items:center;gap:7px;padding:10px 14px;border-radius:var(--r2);background:rgba(34,197,94,.07);border:1px solid rgba(34,197,94,.18);color:var(--ok);font-size:.83rem;font-weight:500}}
-        .acts{{display:flex;gap:10px;flex-wrap:wrap;margin-top:14px}}
-        .ct{{width:100%;border-collapse:collapse;font-size:.82rem}}
-        .ct th{{text-align:left;padding:7px 10px;border-bottom:2px solid var(--border);color:var(--fg2);font-weight:600;font-size:.7rem;text-transform:uppercase;letter-spacing:.04em}}
-        .ct td{{padding:7px 10px;border-bottom:1px solid var(--border)}}.ct tr:last-child td{{border-bottom:none}}.ct tr:hover td{{background:rgba(148,163,184,.04)}}
-        .rbar{{display:flex;align-items:center;gap:7px}}.rmini{{flex:1;height:4px;background:var(--border);border-radius:2px;overflow:hidden}}.rfill{{height:100%;border-radius:2px}}
-        .cbox{{position:relative;height:280px}}
-        .fab{{position:fixed;bottom:18px;right:18px;width:42px;height:42px;display:flex;align-items:center;justify-content:center;cursor:pointer;z-index:200}}
-        .ring{{position:absolute;inset:0}}.rc{{font-size:.68rem;font-weight:700;color:var(--fg2)}}
-        .spin{{display:inline-block;width:7px;height:7px;border-radius:50%;background:var(--acc);animation:pulse 1s infinite}}
+        /* ── Metric row ── */
+        .mrow{{display:grid;grid-template-columns:repeat(auto-fit,minmax(155px,1fr));gap:14px;margin-bottom:28px}}
+        .mc{{background:var(--card);border:1px solid var(--border);border-radius:var(--r);padding:20px;box-shadow:var(--sh);position:relative;overflow:hidden;transition:border-color .2s}}
+        .mc::before{{content:"";position:absolute;top:0;left:0;right:0;height:2px;background:var(--accent-line,var(--acc));opacity:.6}}
+        .mc.ok-line{{--accent-line:var(--ok)}}.mc.warn-line{{--accent-line:var(--warn)}}.mc.bad-line{{--accent-line:var(--bad)}}
+        .ml{{font-size:.67rem;font-weight:700;text-transform:uppercase;letter-spacing:.08em;color:var(--fg3);margin-bottom:8px}}
+        .mv{{font-size:1.7rem;font-weight:800;line-height:1;letter-spacing:-.02em}}.mv.ok{{color:var(--ok)}}.mv.warn{{color:var(--warn)}}.mv.bad{{color:var(--bad)}}
+        .ms{{font-size:.73rem;color:var(--fg2);margin-top:5px}}
+        /* ── Bank cards ── */
+        .bg{{display:grid;grid-template-columns:repeat(auto-fit,minmax(290px,1fr));gap:16px;margin-bottom:28px}}
+        .bcard{{background:var(--card);border:1px solid var(--border);border-radius:var(--r);padding:20px;box-shadow:var(--sh);transition:border-color .25s,box-shadow .25s}}
+        .bcard:hover{{border-color:var(--border2);box-shadow:var(--sh2)}}
+        .bcard.alert{{border-color:rgba(239,68,68,.4);box-shadow:0 0 20px rgba(239,68,68,.1)}}
+        .bhdr{{display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:16px}}
+        .bname{{font-size:.9rem;font-weight:700;color:var(--fg)}}.bsub{{font-size:.68rem;color:var(--fg3);margin-top:2px}}
+        .bv{{font-size:2.1rem;font-weight:800;letter-spacing:-.03em;line-height:1}}.bv.ok{{color:var(--ok)}}.bv.warn{{color:var(--warn)}}.bv.bad{{color:var(--bad)}}
+        .vtrack{{height:6px;background:var(--border);border-radius:3px;margin:12px 0;overflow:hidden}}
+        .vfill{{height:100%;border-radius:3px;transition:width .6s cubic-bezier(.4,0,.2,1)}}.vfill.ok{{background:linear-gradient(90deg,var(--ok),#4ade80)}}.vfill.warn{{background:linear-gradient(90deg,var(--warn),#fcd34d)}}.vfill.bad{{background:linear-gradient(90deg,var(--bad),#f87171)}}
+        .btemps{{display:flex;gap:16px;font-size:.75rem;color:var(--fg2);margin-bottom:12px;flex-wrap:wrap}}
+        .btemps>span{{display:flex;flex-direction:column;gap:2px}}
+        .btemps .lbl{{font-size:.63rem;font-weight:700;text-transform:uppercase;letter-spacing:.07em;color:var(--fg3)}}
+        .btemps .val{{font-size:.9rem;font-weight:600;color:var(--fg)}}.btemps .val.warn{{color:var(--warn)}}.btemps .val.bad{{color:var(--bad)}}
+        .sgrid{{display:grid;grid-template-columns:repeat(auto-fill,minmax(44px,1fr));gap:3px;margin-top:4px}}
+        .sc{{padding:4px 2px;border-radius:5px;font-size:.67rem;text-align:center;border:1px solid transparent;background:rgba(122,139,160,.05);font-weight:500;transition:background .2s}}
+        .sc.ok{{border-color:rgba(34,197,94,.2);color:var(--ok);background:rgba(34,197,94,.05)}}
+        .sc.warm{{border-color:rgba(245,158,11,.3);color:var(--warn);background:rgba(245,158,11,.07)}}
+        .sc.hot{{border-color:rgba(239,68,68,.35);color:var(--bad);background:rgba(239,68,68,.08)}}
+        .sc.null{{color:var(--fg3);font-style:italic}}
+        /* ── Two-col ── */
+        .two{{display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-bottom:28px}}
+        @media(max-width:900px){{.two{{grid-template-columns:1fr}}}}
+        .card{{background:var(--card);border:1px solid var(--border);border-radius:var(--r);padding:20px;box-shadow:var(--sh)}}
+        /* ── Alerts ── */
+        .alist{{display:flex;flex-direction:column;gap:8px}}
+        .ai{{display:flex;align-items:flex-start;gap:10px;padding:10px 14px;border-radius:var(--r2);font-size:.82rem;background:var(--bad-glow);border:1px solid rgba(239,68,68,.25);color:#fca5a5;line-height:1.4}}
+        .ai-icon{{flex-shrink:0;margin-top:1px}}
+        .noa{{display:flex;align-items:center;gap:8px;padding:11px 15px;border-radius:var(--r2);background:var(--ok-glow);border:1px solid rgba(34,197,94,.2);color:var(--ok);font-size:.82rem;font-weight:500}}
+        .acts{{display:flex;gap:10px;flex-wrap:wrap;margin-top:16px;padding-top:16px;border-top:1px solid var(--border)}}
+        /* ── Comm stats ── */
+        .ct{{width:100%;border-collapse:collapse;font-size:.8rem}}
+        .ct th{{text-align:left;padding:8px 10px;border-bottom:2px solid var(--border);color:var(--fg3);font-weight:600;font-size:.68rem;text-transform:uppercase;letter-spacing:.06em}}
+        .ct td{{padding:8px 10px;border-bottom:1px solid var(--border)}}.ct tr:last-child td{{border-bottom:none}}
+        .ct tr:hover td{{background:rgba(255,255,255,.02)}}
+        .rbar{{display:flex;align-items:center;gap:7px}}.rmini{{flex:1;height:5px;background:var(--border);border-radius:3px;overflow:hidden}}.rfill{{height:100%;border-radius:3px;transition:width .4s}}
+        /* ── Chart ── */
+        .chart-wrap{{position:relative;height:290px;margin-top:4px}}
+        /* ── FAB ── */
+        .fab{{position:fixed;bottom:20px;right:20px;width:44px;height:44px;display:flex;align-items:center;justify-content:center;cursor:pointer;z-index:300;filter:drop-shadow(0 2px 8px rgba(0,0,0,.4))}}
+        .ring{{position:absolute;inset:0}}.rc{{font-size:.68rem;font-weight:700;color:var(--fg2);line-height:1}}
+        /* ── Flash animation ── */
+        @keyframes flashOk{{0%{{background:rgba(34,197,94,.15)}}100%{{background:transparent}}}}
+        @keyframes flashBad{{0%{{background:rgba(239,68,68,.15)}}100%{{background:transparent}}}}
+        .flash-ok{{animation:flashOk .5s ease-out}}
+        .flash-bad{{animation:flashBad .5s ease-out}}
+        /* ── Spinner ── */
+        .spin{{display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--acc);animation:pulse 1s infinite}}
+        /* ── Balancing indicator ── */
+        .bal-active{{color:var(--acc);font-weight:700}}
+        /* ── Divider ── */
+        .div{{height:1px;background:var(--border);margin:4px 0 16px}}
     </style>
 </head>
 <body>
 <div class="topbar">
-    <div class="tr">
-        <div class="logo">BMS <span>Dashboard</span></div>
-        <span class="badge idle" id="sbadge"><span class="dot"></span><span id="stext">Connecting…</span></span>
+    <div style="display:flex;align-items:center;gap:14px">
+        <div class="logo"><div class="logo-icon">⚡</div>BMS Dashboard</div>
+        <span class="badge idle" id="sbadge"><span class="dot pulse" id="sbdot"></span><span id="stext">Connecting…</span></span>
     </div>
-    <div class="tr">
-        <span class="ts" id="lupd">—</span>
-        <button class="btn" id="theme-btn">☀/☾</button>
+    <div class="topbar-r">
+        <span class="ts" id="lupd"></span>
+        <button class="btn" id="theme-btn" title="Toggle theme">◑</button>
         <button class="btn p" id="refresh-btn">↻ Refresh</button>
     </div>
 </div>
 <div class="wrap">
-    <div class="mrow">
-        <div class="mc"><div class="ml">Total Voltage</div><div class="mv ok" id="tv">—</div><div class="ms">All banks combined</div></div>
-        <div class="mc"><div class="ml">Balancing</div><div class="mv ok" id="bm">—</div><div class="ms" id="bms2">—</div></div>
-        <div class="mc"><div class="ml">Active Alerts</div><div class="mv ok" id="ac">—</div><div class="ms">System health</div></div>
-        <div class="mc"><div class="ml">Avg Temperature</div><div class="mv ok" id="at">—</div><div class="ms">All sensors</div></div>
+    <!-- Metric Summary Row -->
+    <div class="mrow" id="metric-row">
+        <div class="mc ok-line" id="mc-tv"><div class="ml">Total Voltage</div><div class="mv ok" id="tv">—</div><div class="ms" id="tv-sub">All banks combined</div></div>
+        <div class="mc" id="mc-bm"><div class="ml">Balancing</div><div class="mv ok" id="bm">—</div><div class="ms" id="bms2">—</div></div>
+        <div class="mc ok-line" id="mc-ac"><div class="ml">Active Alerts</div><div class="mv ok" id="ac">—</div><div class="ms">System health</div></div>
+        <div class="mc ok-line" id="mc-at"><div class="ml">Avg Temperature</div><div class="mv ok" id="at">—</div><div class="ms">All sensors</div></div>
     </div>
+    <!-- Battery Banks -->
     <div class="sh">Battery Banks</div>
     <div class="bg" id="battery-container"></div>
+    <!-- Alerts + Comm -->
     <div class="two">
         <div class="card">
             <div class="sh">Alerts</div>
             <div id="alerts-container"><div class="noa">⟳ Loading…</div></div>
-            <div class="acts"><button class="btn d" id="balance-btn" disabled>⚡ Balance Now</button></div>
+            <div class="acts">
+                <button class="btn danger" id="balance-btn" disabled>⚡ Balance Now</button>
+            </div>
         </div>
         <div class="card">
             <div class="sh">Communication Health</div>
-            <div id="comm-stats-container"><p style="color:var(--fg2);font-size:.83rem">Loading…</p></div>
+            <div id="comm-stats-container"><p style="color:var(--fg2);font-size:.82rem">Loading…</p></div>
         </div>
     </div>
-    <div class="card" style="margin-bottom:24px">
+    <!-- History Chart -->
+    <div class="card" style="margin-bottom:28px">
         <div class="sh">Voltage &amp; Temperature History</div>
-        <div class="cbox"><canvas id="bmsChart"></canvas></div>
+        <div class="chart-wrap"><canvas id="bmsChart"></canvas></div>
     </div>
 </div>
+<!-- FAB auto-refresh ring -->
 <div class="fab" id="fab" title="Auto-refresh">
-    <svg class="ring" viewBox="0 0 42 42">
-        <circle cx="21" cy="21" r="17" fill="none" stroke="var(--border)" stroke-width="3"/>
-        <circle id="rarc" cx="21" cy="21" r="17" fill="none" stroke="var(--acc)" stroke-width="3"
-            stroke-dasharray="106.8" stroke-dashoffset="106.8" stroke-linecap="round" transform="rotate(-90 21 21)"/>
+    <svg class="ring" viewBox="0 0 44 44">
+        <circle cx="22" cy="22" r="18" fill="none" stroke="var(--border)" stroke-width="3"/>
+        <circle id="rarc" cx="22" cy="22" r="18" fill="none" stroke="var(--acc)" stroke-width="3"
+            stroke-dasharray="113.1" stroke-dashoffset="113.1" stroke-linecap="round" transform="rotate(-90 22 22)"/>
     </svg>
     <span class="rc" id="rcd">5</span>
 </div>
 <script>
+    // ── Theme ──────────────────────────────────────────────────────
     const docEl = document.documentElement;
     const storedTheme = localStorage.getItem('bms-t') || 'dark';
     docEl.setAttribute('data-theme', storedTheme);
@@ -4119,132 +4172,172 @@ def start_web_server(settings):
         if (myChart) {{ applyChartTheme(); myChart.update(); }}
     }});
     function isDark() {{ return docEl.getAttribute('data-theme') === 'dark'; }}
+
+    // ── Chart theme ───────────────────────────────────────────────
     function chartColors() {{
         return {{
-            text: isDark() ? '#94a3b8' : '#64748b',
-            grid: isDark() ? 'rgba(51,65,85,.8)' : 'rgba(203,213,225,.8)',
-            tip_bg: isDark() ? '#1e293b' : '#fff',
-            tip_border: isDark() ? '#334155' : '#cbd5e1',
-            tip_title: isDark() ? '#f1f5f9' : '#0f172a',
-            tip_body: isDark() ? '#94a3b8' : '#64748b',
+            text:      isDark() ? '#7a8ba0' : '#4a6072',
+            grid:      isDark() ? 'rgba(30,48,68,.9)' : 'rgba(208,218,228,.8)',
+            tip_bg:    isDark() ? '#111d2e' : '#ffffff',
+            tip_bdr:   isDark() ? '#1e3044' : '#d0dae4',
+            tip_title: isDark() ? '#e2e8f0' : '#0f1e2d',
+            tip_body:  isDark() ? '#7a8ba0' : '#4a6072',
         }};
     }}
     function applyChartTheme() {{
         if (!myChart) return;
         const c = chartColors();
-        myChart.options.scales.x.ticks.color = c.text;
-        myChart.options.scales.x.grid.color = c.grid;
-        myChart.options.scales.y.ticks.color = c.text;
-        myChart.options.scales.y.grid.color = c.grid;
-        myChart.options.scales.y.title.color = c.text;
-        myChart.options.scales.temp.ticks.color = c.text;
-        myChart.options.scales.temp.title.color = c.text;
+        ['x','y','temp'].forEach(ax => {{
+            if (myChart.options.scales[ax]) {{
+                myChart.options.scales[ax].ticks.color = c.text;
+                myChart.options.scales[ax].grid.color = c.grid;
+                if (myChart.options.scales[ax].title) myChart.options.scales[ax].title.color = c.text;
+            }}
+        }});
         myChart.options.plugins.legend.labels.color = c.text;
-        myChart.options.plugins.tooltip.backgroundColor = c.tip_bg;
-        myChart.options.plugins.tooltip.borderColor = c.tip_border;
-        myChart.options.plugins.tooltip.titleColor = c.tip_title;
-        myChart.options.plugins.tooltip.bodyColor = c.tip_body;
+        Object.assign(myChart.options.plugins.tooltip, {{
+            backgroundColor: c.tip_bg, borderColor: c.tip_bdr,
+            titleColor: c.tip_title, bodyColor: c.tip_body
+        }});
     }}
 
+    // ── FAB countdown ─────────────────────────────────────────────
     let rIn = 5;
     const arc = document.getElementById('rarc');
     const rcdEl = document.getElementById('rcd');
-    const C = 2 * Math.PI * 17;
-    function updArc() {{ arc.setAttribute('stroke-dashoffset', C * (rIn/5)); rcdEl.textContent = rIn; }}
+    const C = 2 * Math.PI * 18;
+    function updArc() {{ arc.setAttribute('stroke-dashoffset', C * (rIn / 5)); rcdEl.textContent = rIn; }}
     updArc();
     setInterval(() => {{ rIn--; if (rIn <= 0) {{ rIn = 5; updateStatus(); }} updArc(); }}, 1000);
 
-    function vcls(v, lo, hi) {{ return (v===0||v===null)?'bad':((v>hi||v<lo)?'warn':'ok'); }}
-    function tcls(t, lo, hi) {{ return t===null?'null':(t>hi?'hot':(t>hi*.88?'warm':'ok')); }}
+    // ── Helpers ────────────────────────────────────────────────────
+    function vcls(v, lo, hi) {{ return (!v || v === 0) ? 'bad' : (v > hi || v < lo) ? 'warn' : 'ok'; }}
+    function tcls(t, lo, hi) {{ return t === null ? 'null' : t > hi ? 'hot' : t > hi * .9 ? 'warm' : 'ok'; }}
+    function flash(el, cls) {{
+        el.classList.remove('flash-ok','flash-bad');
+        void el.offsetWidth;
+        el.classList.add(cls);
+        setTimeout(() => el.classList.remove(cls), 600);
+    }}
+    let prevVoltage = null;
 
+    // ── Status update ──────────────────────────────────────────────
     function updateStatus() {{
-        fetch('/api/status').then(r=>r.json()).then(data => {{
+        fetch('/api/status').then(r => r.json()).then(data => {{
             const ok = data.system_status !== 'Alert';
             const badge = document.getElementById('sbadge');
             badge.className = 'badge ' + (ok ? 'ok' : 'bad');
+            document.getElementById('sbdot').className = 'dot pulse';
             document.getElementById('stext').textContent = ok ? '✓ Running' : '⚠ Alert';
-            document.getElementById('lupd').textContent = 'Updated ' + new Date(data.last_update*1000).toLocaleTimeString();
+            document.getElementById('lupd').textContent = 'Updated ' + new Date(data.last_update * 1000).toLocaleTimeString();
 
+            // Total voltage
             const tvEl = document.getElementById('tv');
-            tvEl.textContent = data.total_voltage.toFixed(2) + 'V';
-            tvEl.className = 'mv ' + (ok ? 'ok' : 'warn');
+            const newV = data.total_voltage;
+            tvEl.textContent = newV.toFixed(2) + 'V';
+            const tvCls = vcls(newV, data.low_voltage_threshold * data.voltages.length * 0.95, data.high_voltage_threshold * data.voltages.length * 1.02);
+            tvEl.className = 'mv ' + tvCls;
+            const mcTv = document.getElementById('mc-tv');
+            mcTv.className = 'mc ' + tvCls + '-line';
+            if (prevVoltage !== null && Math.abs(newV - prevVoltage) > 0.01) flash(mcTv, 'flash-ok');
+            prevVoltage = newV;
 
+            // Balancing
             const bmEl = document.getElementById('bm');
             const bm2 = document.getElementById('bms2');
+            const mcBm = document.getElementById('mc-bm');
             if (data.balancing) {{
                 bmEl.innerHTML = '<span class="spin"></span> Active';
-                bmEl.style.color = 'var(--acc)';
+                bmEl.className = 'mv bal-active';
                 bm2.textContent = 'Charge transfer in progress';
+                mcBm.className = 'mc ok-line';
             }} else {{
-                bmEl.innerHTML = 'Idle';
+                bmEl.textContent = 'Idle';
                 bmEl.className = 'mv ok';
-                bmEl.style.color = '';
                 bm2.textContent = 'No transfer needed';
+                mcBm.className = 'mc ok-line';
             }}
 
+            // Alerts count
             const acEl = document.getElementById('ac');
             acEl.textContent = data.alerts.length;
-            acEl.className = 'mv ' + (data.alerts.length > 0 ? 'bad' : 'ok');
+            const acCls = data.alerts.length > 0 ? 'bad' : 'ok';
+            acEl.className = 'mv ' + acCls;
+            document.getElementById('mc-ac').className = 'mc ' + acCls + '-line';
 
-            const vt = data.temperatures.filter(t=>t!==null);
-            const avg = vt.length ? vt.reduce((a,b)=>a+b,0)/vt.length : null;
+            // Avg temp
+            const vt = data.temperatures.filter(t => t !== null);
+            const avg = vt.length ? vt.reduce((a, b) => a + b, 0) / vt.length : null;
             const atEl = document.getElementById('at');
-            if (avg !== null) {{ atEl.textContent = avg.toFixed(1)+'°C'; atEl.className = 'mv '+tcls(avg,data.low_threshold,data.high_threshold); }}
+            if (avg !== null) {{
+                atEl.textContent = avg.toFixed(1) + '°C';
+                const tCls = tcls(avg, data.low_threshold, data.high_threshold);
+                atEl.className = 'mv ' + (tCls === 'ok' ? 'ok' : tCls === 'warm' ? 'warn' : 'bad');
+                document.getElementById('mc-at').className = 'mc ' + (tCls === 'ok' ? 'ok' : 'warn') + '-line';
+            }}
 
+            // Banks
             const lo = data.low_voltage_threshold, hi = data.high_voltage_threshold;
+            const spbk = Math.max(1, Math.floor(data.temperatures.length / Math.max(1, data.voltages.length)));
             const container = document.getElementById('battery-container');
             container.innerHTML = '';
-            const spb = data.sensors_per_battery;
-            const spbk = Math.floor(data.temperatures.length / data.voltages.length);
             data.voltages.forEach((v, idx) => {{
-                const s = data.bank_summaries[idx];
+                const s = data.bank_summaries[idx] || {{median:0,min:0,max:0,invalid:0}};
                 const vc = vcls(v, lo, hi);
-                const pct = v > 0 ? Math.min(100, Math.max(0, ((v-lo)/(hi-lo))*100)) : 0;
-                const sensors = data.temperatures.slice(idx*spbk, (idx+1)*spbk);
-                const chips = sensors.map((t,li) => {{
-                    const gi = idx*spbk+li;
-                    const bat = Math.floor(gi/spb)+1;
-                    const ch = (gi%spb)+1;
+                const pct = v > 0 ? Math.min(100, Math.max(0, ((v - lo) / (hi - lo)) * 100)) : 0;
+                const sensors = data.temperatures.slice(idx * spbk, (idx + 1) * spbk);
+                const spb = data.sensors_per_battery || 8;
+                const chips = sensors.map((t, li) => {{
+                    const gi = idx * spbk + li;
+                    const bat = Math.floor(gi / spb) + 1;
+                    const ch = (gi % spb) + 1;
                     const tc = tcls(t, data.low_threshold, data.high_threshold);
-                    return `<div class="sc ${{tc}}" title="Bat ${{bat}} C${{ch}}">${{t!==null?t.toFixed(1)+'°':'N/A'}}</div>`;
+                    return `<div class="sc ${{tc}}" title="Bat ${{bat}} C${{ch}}">${{t !== null ? t.toFixed(1) + '°' : 'N/A'}}</div>`;
                 }}).join('');
                 const mc = tcls(s.median, data.low_threshold, data.high_threshold);
-                container.innerHTML += `<div class="bcard">
+                const alertCls = (vc !== 'ok' || mc === 'hot') ? ' alert' : '';
+                container.innerHTML += `<div class="bcard${{alertCls}}">
                     <div class="bhdr">
-                        <div><div class="bname">Bank ${{idx+1}}</div><div class="bsub">${{spbk}} sensors</div></div>
-                        <div class="bv ${{vc}}">${{v&&v>0?v.toFixed(2)+'V':'N/A'}}</div>
+                        <div><div class="bname">Bank ${{idx + 1}}</div><div class="bsub">${{spbk}} temp sensors</div></div>
+                        <div class="bv ${{vc}}">${{v && v > 0 ? v.toFixed(3) + 'V' : 'N/A'}}</div>
                     </div>
                     <div class="vtrack"><div class="vfill ${{vc}}" style="width:${{pct}}%"></div></div>
                     <div class="btemps">
-                        <span><span>MED</span><span class="v ${{mc}}">${{s.median.toFixed(1)}}°C</span></span>
-                        <span><span>MIN</span><span class="v">${{s.min.toFixed(1)}}°C</span></span>
-                        <span><span>MAX</span><span class="v ${{s.max>data.high_threshold?'bad':''}}">${{s.max.toFixed(1)}}°C</span></span>
-                        <span><span>INV</span><span class="v ${{s.invalid>0?'warn':''}}">${{s.invalid}}</span></span>
+                        <span><span class="lbl">Median</span><span class="val ${{mc === 'ok' ? '' : mc === 'warm' ? 'warn' : 'bad'}}">${{s.median.toFixed(1)}}°C</span></span>
+                        <span><span class="lbl">Min</span><span class="val">${{s.min.toFixed(1)}}°C</span></span>
+                        <span><span class="lbl">Max</span><span class="val ${{s.max > data.high_threshold ? 'bad' : ''}}">${{s.max.toFixed(1)}}°C</span></span>
+                        <span><span class="lbl">Invalid</span><span class="val ${{s.invalid > 0 ? 'warn' : ''}}">${{s.invalid}}</span></span>
                     </div>
+                    <div class="div"></div>
                     <div class="sgrid">${{chips}}</div>
                 </div>`;
             }});
 
+            // Alerts list
             const ad = document.getElementById('alerts-container');
             if (data.alerts.length > 0) {{
-                ad.innerHTML = '<div class="alist">'+data.alerts.map(a=>`<div class="ai">⚠ ${{a}}</div>`).join('')+'</div>';
+                ad.innerHTML = '<div class="alist">' + data.alerts.map(a =>
+                    `<div class="ai"><span class="ai-icon">⚠</span>${{a}}</div>`
+                ).join('') + '</div>';
             }} else {{
-                ad.innerHTML = '<div class="noa">✓ All systems normal</div>';
+                ad.innerHTML = '<div class="noa"><span>✓</span> All systems normal</div>';
             }}
             document.getElementById('balance-btn').disabled = data.balancing || data.alerts.length > 0;
+
         }}).catch(() => {{
             document.getElementById('sbadge').className = 'badge bad';
             document.getElementById('stext').textContent = '✗ Connection Error';
         }});
     }}
 
+    // ── History Chart ──────────────────────────────────────────────
     let myChart = null;
     function updateChart() {{
-        fetch('/api/history').then(r=>r.json()).then(data => {{
+        fetch('/api/history').then(r => r.json()).then(data => {{
             const hist = data.history;
             if (!hist || !hist.length) return;
             const c = chartColors();
-            const labels = hist.map(h => new Date(h.time*1000).toLocaleTimeString());
+            const labels = hist.map(h => new Date(h.time * 1000).toLocaleTimeString());
             const datasets = [
                 {datasets_array}
             ];
@@ -4255,52 +4348,69 @@ def start_web_server(settings):
                 data: {{ labels, datasets }},
                 options: {{
                     responsive: true, maintainAspectRatio: false,
-                    animation: {{ duration: 400 }},
+                    animation: {{ duration: 300 }},
                     interaction: {{ mode: 'index', intersect: false }},
+                    elements: {{ point: {{ radius: 0, hoverRadius: 4 }}, line: {{ tension: 0.3, borderWidth: 2 }} }},
                     plugins: {{
-                        legend: {{ labels: {{ color: c.text, usePointStyle: true, pointStyle: 'circle', padding: 14 }} }},
-                        tooltip: {{ backgroundColor: c.tip_bg, borderColor: c.tip_border, borderWidth: 1, titleColor: c.tip_title, bodyColor: c.tip_body }}
+                        legend: {{ labels: {{ color: c.text, usePointStyle: true, pointStyle: 'circle', padding: 16, font: {{ size: 12, family: 'Inter' }} }} }},
+                        tooltip: {{ backgroundColor: c.tip_bg, borderColor: c.tip_bdr, borderWidth: 1, titleColor: c.tip_title, bodyColor: c.tip_body, padding: 10, titleFont: {{ family: 'Inter' }}, bodyFont: {{ family: 'Inter' }} }}
                     }},
                     scales: {{
-                        x: {{ ticks: {{ color: c.text, maxTicksLimit: 8 }}, grid: {{ color: c.grid }} }},
-                        y: {{ type: 'linear', position: 'left', title: {{ display: true, text: 'Voltage (V)', color: c.text }}, ticks: {{ color: c.text }}, grid: {{ color: c.grid }} }},
-                        temp: {{ type: 'linear', position: 'right', title: {{ display: true, text: 'Temp (°C)', color: c.text }}, ticks: {{ color: c.text }}, grid: {{ drawOnChartArea: false }} }}
+                        x: {{ ticks: {{ color: c.text, maxTicksLimit: 10, font: {{ size: 11 }} }}, grid: {{ color: c.grid }} }},
+                        y: {{ type: 'linear', position: 'left', title: {{ display: true, text: 'Voltage (V)', color: c.text, font: {{ size: 11 }} }}, ticks: {{ color: c.text, font: {{ size: 11 }} }}, grid: {{ color: c.grid }} }},
+                        temp: {{ type: 'linear', position: 'right', title: {{ display: true, text: 'Temp (°C)', color: c.text, font: {{ size: 11 }} }}, ticks: {{ color: c.text, font: {{ size: 11 }} }}, grid: {{ drawOnChartArea: false }} }}
                     }}
                 }}
             }});
         }}).catch(e => console.error('History error:', e));
     }}
 
+    // ── Comm Stats ────────────────────────────────────────────────
     function updateCommStats() {{
-        fetch('/api/comm_stats').then(r=>r.json()).then(data => {{
+        fetch('/api/comm_stats').then(r => r.json()).then(data => {{
             const el = document.getElementById('comm-stats-container');
-            if (!data.slaves || !data.slaves.length) {{ el.innerHTML = '<p style="color:var(--fg2);font-size:.83rem">No data</p>'; return; }}
+            if (!data.slaves || !data.slaves.length) {{
+                el.innerHTML = '<p style="color:var(--fg2);font-size:.82rem">No data</p>';
+                return;
+            }}
             let h = '<table class="ct"><thead><tr><th>Slave</th><th>OK</th><th>Fail</th><th>Rate</th><th>Last Error</th></tr></thead><tbody>';
             data.slaves.forEach(s => {{
                 const r = s.success_rate;
-                const rc = r>=80?'var(--ok)':r>=50?'var(--warn)':'var(--bad)';
-                const err = s.last_error_type || (s.last_error ? new Date(s.last_error*1000).toLocaleTimeString() : '—');
-                h += `<tr><td style="font-weight:600">S${{s.slave_addr}}</td><td style="color:var(--ok)">${{s.success_count}}</td><td style="color:var(--bad)">${{s.fail_count}}</td>
-                    <td><div class="rbar"><div class="rmini"><div class="rfill" style="width:${{r}}%;background:${{rc}}"></div></div><span style="color:${{rc}};font-weight:600;font-size:.75rem">${{r}}%</span></div></td>
-                    <td style="color:var(--fg2);font-size:.75rem">${{err}}</td></tr>`;
+                const rc = r >= 90 ? 'var(--ok)' : r >= 60 ? 'var(--warn)' : 'var(--bad)';
+                const err = s.last_error_type || (s.last_error ? new Date(s.last_error * 1000).toLocaleTimeString() : '—');
+                h += `<tr>
+                    <td style="font-weight:600;color:var(--fg)">S${{s.slave_addr}}</td>
+                    <td style="color:var(--ok)">${{s.success_count}}</td>
+                    <td style="color:var(--bad)">${{s.fail_count}}</td>
+                    <td><div class="rbar"><div class="rmini"><div class="rfill" style="width:${{r}}%;background:${{rc}}"></div></div><span style="color:${{rc}};font-weight:600;font-size:.73rem;white-space:nowrap">${{r}}%</span></div></td>
+                    <td style="color:var(--fg2);font-size:.73rem">${{err}}</td>
+                </tr>`;
             }});
-            h += `</tbody></table><div style="margin-top:8px;font-size:.75rem;color:var(--fg2)">Total: ${{data.total_success}} ok / ${{data.total_fail}} fail</div>`;
+            h += `</tbody></table><div style="margin-top:10px;font-size:.73rem;color:var(--fg3)">Total: ${{data.total_success}} ok / ${{data.total_fail}} fail</div>`;
             el.innerHTML = h;
-        }}).catch(() => {{ document.getElementById('comm-stats-container').innerHTML = '<p style="color:var(--bad);font-size:.83rem">Failed to load</p>'; }});
+        }}).catch(() => {{
+            document.getElementById('comm-stats-container').innerHTML = '<p style="color:var(--bad);font-size:.82rem">Failed to load</p>';
+        }});
     }}
 
+    // ── Balance ───────────────────────────────────────────────────
     function initiateBalance() {{
-        fetch('/api/balance', {{method:'POST'}}).then(r=>r.json())
-            .then(d => alert((d.success?'✓ ':'⚠ ')+d.message))
-            .catch(e => alert('Error: '+e.message));
+        fetch('/api/balance', {{ method: 'POST' }}).then(r => r.json())
+            .then(d => alert((d.success ? '✓ ' : '⚠ ') + d.message))
+            .catch(e => alert('Error: ' + e.message));
     }}
 
-    document.getElementById('refresh-btn').addEventListener('click', () => {{ rIn=5; updateStatus(); }});
+    // ── Wiring ────────────────────────────────────────────────────
+    document.getElementById('refresh-btn').addEventListener('click', () => {{ rIn = 5; updateStatus(); }});
     document.getElementById('balance-btn').addEventListener('click', initiateBalance);
-    document.getElementById('fab').addEventListener('click', () => {{ rIn=5; updateStatus(); }});
-    updateStatus(); updateChart(); updateCommStats();
+    document.getElementById('fab').addEventListener('click', () => {{ rIn = 5; updateStatus(); }});
+
+    // Initial load
+    updateStatus();
+    updateChart();
+    updateCommStats();
+    setInterval(updateChart, 30000);
     setInterval(updateCommStats, 10000);
-    setInterval(updateChart, 60000);
 </script>
 </body>
 </html>"""

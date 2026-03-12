@@ -202,8 +202,9 @@ class BmsBatteryService:
                 return None
         try:
             result = self._modbus_client.read_holding_registers(address, count=count, unit=BMS_UNIT_ID)
-            if result.isError():
+            if result is None or result.isError():
                 log.warning(f'Modbus read error at register {address}: {result}')
+                self._connected = False  # Force reconnect on next call
                 return None
             return result.registers
         except Exception as e:

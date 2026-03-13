@@ -4572,6 +4572,13 @@ def start_web_server(settings):
                 logging.error(f'Cerbo GX SSH error ({action}): {err}')
                 return jsonify({'success': False, 'message': f'SSH error: {err}'}), 500
             cerbo_integration_enabled = want_enabled
+            state_file = settings.get('cerbo_state_file')
+            if state_file:
+                try:
+                    with open(state_file, 'w') as _sf:
+                        _sf.write('enabled' if want_enabled else 'disabled')
+                except Exception as _e:
+                    logging.warning(f'Could not save Cerbo state: {_e}')
             logging.info(f'Cerbo GX integration {action} via web UI')
             return jsonify({'success': True, 'enabled': cerbo_integration_enabled, 'message': f'Cerbo GX integration {action}'})
         except subprocess.TimeoutExpired:
@@ -4675,6 +4682,16 @@ def main(stdscr):
     # Initialize communication statistics
     init_comm_stats(slave_addresses)
     # Web.
+    # Cerbo integration state persistence.
+    _cerbo_state_file = os.path.join(data_dir, 'cerbo_integration_state')
+    settings['cerbo_state_file'] = _cerbo_state_file
+    if os.path.exists(_cerbo_state_file):
+        try:
+            with open(_cerbo_state_file) as _f:
+                cerbo_integration_enabled = _f.read().strip() == 'enabled'
+            logging.info(f'Cerbo integration state loaded: {"enabled" if cerbo_integration_enabled else "disabled"}')
+        except Exception:
+            pass  # fall back to default True
     start_web_server(settings)
     # Modbus TCP server for Victron Cerbo GX.
     if settings.get('enabled', True):

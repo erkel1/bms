@@ -394,6 +394,7 @@ startup_set = False # Indicates if temperature calibration is set - calibration 
 _calibration_cache = None  # Cache for perform_calibration to avoid repeated disk reads
 alert_states = {} # Tracks alerts for each temperature channel - alert memory.
 balancing_active = False # Indicates if balancing is currently happening - balancing flag.
+cerbo_integration_enabled = True  # Whether the Cerbo GX dbus-bms-battery service is active.
 startup_failed = False # Indicates if startup tests failed - test fail flag.
 startup_alerts = [] # Stores startup test failure messages - test error list.
 balancer_failed = False # New: Indicates if balancer hardware failed verification - prevents future balancing.
@@ -1110,9 +1111,15 @@ def load_config(data_dir):
     relay_pins = {
         f'Relay{i}_Pin': config_parser.getint('GPIO', f'Relay{i}_Pin', fallback=[17,18,27,22][i]) for i in range(4)
     }
+    # Cerbo GX SSH control settings.
+    cerbo_settings = {
+        'cerbo_ip': config_parser.get('CerboGX', 'ip', fallback='192.168.15.67'),
+        'cerbo_pass': config_parser.get('CerboGX', 'password', fallback='555555'),
+        'cerbo_ssh_timeout': config_parser.getint('CerboGX', 'ssh_timeout', fallback=8),
+    }
     return {**temp_settings, **voltage_settings, **general_flags, **i2c_settings,
             **gpio_settings, **email_settings, **adc_settings, **calibration_settings,
-            **startup_settings, **web_settings, **modbus_server_settings, **dvcc_settings, 'relay_mapping': relay_mapping, **relay_pins}
+            **startup_settings, **web_settings, **modbus_server_settings, **dvcc_settings, **cerbo_settings, 'relay_mapping': relay_mapping, **relay_pins}
 
 def validate_config(settings):
     """
@@ -4040,6 +4047,18 @@ def start_web_server(settings):
         .btn:disabled{{opacity:.3;cursor:not-allowed}}
         .btn.p{{background:var(--acc);border-color:var(--acc);color:#fff;box-shadow:0 0 12px var(--acc-glow)}}.btn.p:hover{{background:var(--acc2);border-color:var(--acc2)}}
         .btn.danger{{background:var(--bad-glow);border-color:rgba(239,68,68,.3);color:var(--bad)}}.btn.danger:hover{{background:rgba(239,68,68,.2)}}
+        /* Cerbo GX toggle */
+        .cerbo-toggle{{display:flex;align-items:center;gap:8px;padding:0 4px}}
+        .cerbo-label{{font-size:.76rem;font-weight:600;color:var(--fg2);white-space:nowrap}}
+        .sw{{position:relative;width:40px;height:22px;flex-shrink:0}}
+        .sw input{{opacity:0;width:0;height:0;position:absolute}}
+        .sw-track{{position:absolute;inset:0;border-radius:999px;background:var(--border2);border:1px solid var(--border);cursor:pointer;transition:background .2s,border-color .2s}}
+        .sw-track::after{{content:'';position:absolute;top:2px;left:2px;width:16px;height:16px;border-radius:50%;background:#fff;box-shadow:0 1px 3px rgba(0,0,0,.4);transition:transform .2s}}
+        .sw input:checked+.sw-track{{background:var(--ok);border-color:var(--ok)}}
+        .sw input:checked+.sw-track::after{{transform:translateX(18px)}}
+        .sw input:disabled+.sw-track{{opacity:.5;cursor:not-allowed}}
+        .cerbo-status{{font-size:.72rem;font-weight:700;min-width:36px}}
+        .cerbo-status.on{{color:var(--ok)}}.cerbo-status.off{{color:var(--bad)}}
         /* ── Layout ── */
         .wrap{{max-width:1440px;margin:0 auto;padding:24px 28px}}
         @media(max-width:768px){{.wrap{{padding:16px}}}}
@@ -4116,6 +4135,11 @@ def start_web_server(settings):
     </div>
     <div class="topbar-r">
         <span class="ts" id="lupd"></span>
+        <div class="cerbo-toggle" title="Enable / disable Cerbo GX dbus-bms-battery service">
+            <span class="cerbo-label">Cerbo GX</span>
+            <label class="sw"><input type="checkbox" id="cerbo-toggle"><span class="sw-track"></span></label>
+            <span class="cerbo-status" id="cerbo-status">…</span>
+        </div>
         <button class="btn" id="theme-btn" title="Toggle theme">◑</button>
         <button class="btn p" id="refresh-btn">↻ Refresh</button>
     </div>
@@ -4400,6 +4424,41 @@ def start_web_server(settings):
             .catch(e => alert('Error: ' + e.message));
     }}
 
+    // ── Cerbo GX Toggle ───────────────────────────────────────────
+    const cerboToggle = document.getElementById('cerbo-toggle');
+    const cerboStatus = document.getElementById('cerbo-status');
+
+    function setCerboUI(enabled, busy) {{
+        cerboToggle.checked = enabled;
+        cerboToggle.disabled = busy;
+        cerboStatus.textContent = busy ? '…' : (enabled ? 'ON' : 'OFF');
+        cerboStatus.className = 'cerbo-status ' + (busy ? '' : (enabled ? 'on' : 'off'));
+    }}
+
+    fetch('/api/cerbo_integration').then(r => r.json())
+        .then(d => setCerboUI(d.enabled, false))
+        .catch(() => setCerboUI(false, false));
+
+    cerboToggle.addEventListener('change', function() {{
+        const want = this.checked;
+        setCerboUI(want, true);
+        fetch('/api/cerbo_integration', {{
+            method: 'POST',
+            headers: {{'Content-Type': 'application/json'}},
+            body: JSON.stringify({{enabled: want}})
+        }}).then(r => r.json()).then(d => {{
+            if (d.success) {{
+                setCerboUI(d.enabled, false);
+            }} else {{
+                setCerboUI(!want, false);  // revert
+                alert('⚠ ' + (d.message || 'Failed to contact Cerbo GX'));
+            }}
+        }}).catch(e => {{
+            setCerboUI(!want, false);  // revert
+            alert('Error: ' + e.message);
+        }});
+    }});
+
     // ── Wiring ────────────────────────────────────────────────────
     document.getElementById('refresh-btn').addEventListener('click', () => {{ rIn = 5; updateStatus(); }});
     document.getElementById('balance-btn').addEventListener('click', initiateBalance);
@@ -4481,6 +4540,46 @@ def start_web_server(settings):
             balancing_active = True
         logging.info(f"Balancing initiated via web API from Bank {high_bank} to Bank {low_bank}")
         return jsonify({'success': True, 'message': f'Balancing initiated from Bank {high_bank} to Bank {low_bank}'})
+    # API to enable/disable Cerbo GX dbus-bms-battery integration.
+    @app.route('/api/cerbo_integration', methods=['GET', 'POST'])
+    def api_cerbo_integration():
+        global cerbo_integration_enabled
+        if request.method == 'GET':
+            return jsonify({'enabled': cerbo_integration_enabled})
+        try:
+            data = request.get_json(force=True)
+            want_enabled = bool(data.get('enabled', True))
+            cerbo_ip = settings.get('cerbo_ip', '192.168.15.67')
+            cerbo_pass = settings.get('cerbo_pass', '555555')
+            timeout = settings.get('cerbo_ssh_timeout', 8)
+            if want_enabled:
+                cmd = ['sshpass', '-p', cerbo_pass, 'ssh',
+                       '-o', 'StrictHostKeyChecking=no',
+                       '-o', f'ConnectTimeout={timeout}',
+                       f'root@{cerbo_ip}',
+                       'svc -u /service/dbus-bms-battery']
+                action = 'enabled'
+            else:
+                cmd = ['sshpass', '-p', cerbo_pass, 'ssh',
+                       '-o', 'StrictHostKeyChecking=no',
+                       '-o', f'ConnectTimeout={timeout}',
+                       f'root@{cerbo_ip}',
+                       'svc -d /service/dbus-bms-battery']
+                action = 'disabled'
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout + 2)
+            if result.returncode != 0:
+                err = result.stderr.strip() or result.stdout.strip()
+                logging.error(f'Cerbo GX SSH error ({action}): {err}')
+                return jsonify({'success': False, 'message': f'SSH error: {err}'}), 500
+            cerbo_integration_enabled = want_enabled
+            logging.info(f'Cerbo GX integration {action} via web UI')
+            return jsonify({'success': True, 'enabled': cerbo_integration_enabled, 'message': f'Cerbo GX integration {action}'})
+        except subprocess.TimeoutExpired:
+            return jsonify({'success': False, 'message': 'SSH timed out — is the Cerbo GX reachable?'}), 504
+        except Exception as e:
+            logging.error(f'Error in /api/cerbo_integration: {e}\n{traceback.format_exc()}')
+            return jsonify({'error': str(e)}), 500
+
     # Before each request: Auth check and CORS preflight.
     @app.before_request
     def before_request():

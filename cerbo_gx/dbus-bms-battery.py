@@ -81,7 +81,8 @@ class BmsBatteryService:
         self._modbus_client = None
         self._connected = False
         self._consecutive_errors = 0
-        self._max_errors = 30
+        self._max_errors = 30        # Soft threshold: warn + hold values (60 s)
+        self._stale_errors = 150     # Hard threshold: safe fallback + Connected=0 (5 min)
 
         # Set up D-Bus main loop
         DBusGMainLoop(set_as_default=True)
@@ -219,9 +220,31 @@ class BmsBatteryService:
             main_regs = self._read_register(259, count=16)
             if main_regs is None:
                 self._consecutive_errors += 1
-                if self._consecutive_errors >= self._max_errors:
-                    self._dbusservice['/Connected'] = 0
-                    log.error(f'BMS unreachable after {self._max_errors} attempts')
+                errs = self._consecutive_errors
+                secs = errs * POLL_INTERVAL_MS // 1000
+                if errs >= self._stale_errors:
+                    # 5 minutes of no contact — write safe values then go offline
+                    # AllowToCharge/Discharge=1 + clear alarms so Cerbo falls back
+                    # to its own system charge voltage rather than tripping inverter
+                    if self._dbusservice['/Connected'] != 0:
+                        log.error(f'BMS unreachable for {secs}s — writing safe fallback, setting Connected=0')
+                        self._dbusservice['/Io/AllowToCharge'] = 1
+                        self._dbusservice['/Io/AllowToDischarge'] = 1
+                        self._dbusservice['/Alarms/LowVoltage'] = 0
+                        self._dbusservice['/Alarms/HighVoltage'] = 0
+                        self._dbusservice['/Alarms/LowTemperature'] = 0
+                        self._dbusservice['/Alarms/HighTemperature'] = 0
+                        self._dbusservice['/Alarms/Alarm'] = 0
+                        self._dbusservice['/Connected'] = 0
+                elif errs == self._max_errors:
+                    remaining = (self._stale_errors - errs) * POLL_INTERVAL_MS // 1000
+                    log.warning(f'BMS unreachable for {secs}s — holding last known values, '
+                                f'hard disconnect in {remaining}s if no recovery')
+                elif errs > self._max_errors and errs % 30 == 0:
+                    remaining = (self._stale_errors - errs) * POLL_INTERVAL_MS // 1000
+                    log.warning(f'BMS still unreachable ({secs}s) — hard disconnect in {remaining}s')
+                # /Connected and all D-Bus values unchanged — last known values
+                # keep DVCC and inverter/MPPT running during transient outages
                 return True  # Keep polling
 
             self._consecutive_errors = 0
@@ -358,7 +381,7 @@ class BmsBatteryService:
 
 
 def main():
-    log.info('Starting BMS Battery D-Bus service v1.2')
+    log.info('Starting BMS Battery D-Bus service v1.3')
     log.info(f'BMS: {BMS_HOST}:{BMS_PORT} unit={BMS_UNIT_ID}')
     log.info(f'Service: {SERVICE_NAME} instance={DEVICE_INSTANCE}')
     log.info('NOTE: SOC/Current/Power NOT published - BMS only provides voltage, temperature, alarms')

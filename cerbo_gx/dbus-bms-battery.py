@@ -81,6 +81,8 @@ class BmsBatteryService:
         self._modbus_client = None
         self._connected = False
         self._consecutive_errors = 0
+        self._consecutive_successes = 0
+        self._reconnect_threshold = 5    # Require 5 good reads after hard disconnect
         self._max_errors = 30        # Soft threshold: warn + hold values (60 s)
         self._stale_errors = 150     # Hard threshold: safe fallback + Connected=0 (5 min)
 
@@ -220,6 +222,7 @@ class BmsBatteryService:
             main_regs = self._read_register(259, count=16)
             if main_regs is None:
                 self._consecutive_errors += 1
+                self._consecutive_successes = 0
                 errs = self._consecutive_errors
                 secs = errs * POLL_INTERVAL_MS // 1000
                 if errs >= self._stale_errors:
@@ -248,7 +251,17 @@ class BmsBatteryService:
                 return True  # Keep polling
 
             self._consecutive_errors = 0
-            self._dbusservice['/Connected'] = 1
+            self._consecutive_successes += 1
+            was_hard_disconnected = self._dbusservice['/Connected'] == 0
+            if was_hard_disconnected:
+                if self._consecutive_successes >= self._reconnect_threshold:
+                    log.info(f'BMS reconnected after {self._reconnect_threshold} consecutive good reads')
+                    self._dbusservice['/Connected'] = 1
+                else:
+                    log.info(f'BMS recovering: good read {self._consecutive_successes}/{self._reconnect_threshold}')
+                    # Update values but keep Connected=0 until stable
+            else:
+                self._dbusservice['/Connected'] = 1
 
             # Decode registers the BMS actually provides
             voltage = main_regs[0] / 100.0       # reg 259: total voltage in centivolts
@@ -381,7 +394,7 @@ class BmsBatteryService:
 
 
 def main():
-    log.info('Starting BMS Battery D-Bus service v1.3')
+    log.info('Starting BMS Battery D-Bus service v1.4')
     log.info(f'BMS: {BMS_HOST}:{BMS_PORT} unit={BMS_UNIT_ID}')
     log.info(f'Service: {SERVICE_NAME} instance={DEVICE_INSTANCE}')
     log.info('NOTE: SOC/Current/Power NOT published - BMS only provides voltage, temperature, alarms')

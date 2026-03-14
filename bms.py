@@ -3619,8 +3619,8 @@ def update_modbus_registers(settings):
     min_voltage = min(voltages) if voltages else 0.0
     max_voltage = max(voltages) if voltages else 0.0
     
-    # Skip update if no data available yet
-    if not voltages:
+    # Skip update if no real data available yet (boot initialisation)
+    if not voltages or not web_data.get('data_valid'):
         return
     
     # Build register values using Victron addresses
@@ -4702,6 +4702,7 @@ def main(stdscr):
     BANK_SENSOR_INDICES = [[] for _ in range(settings['num_series_banks'])] # Dynamic list of lists.
     # Init web_data.
     web_data['voltages'] = [0.0] * NUM_BANKS
+    web_data['data_valid'] = False  # Set True after first real voltage read
     web_data['temperatures'] = [None] * total_channels
     web_data['bank_summaries'] = [{'median': 0.0, 'min': 0.0, 'max': 0.0, 'invalid': 0} for _ in range(NUM_BANKS)]
     # Build indices.
@@ -4903,6 +4904,7 @@ def main(stdscr):
         # Update web data (locked).
         with data_lock:
             web_data['voltages'] = battery_voltages
+            web_data['data_valid'] = True
             web_data['temperatures'] = calibrated_temps
             web_data['bank_summaries'] = bank_stats
             web_data['alerts'] = all_alerts

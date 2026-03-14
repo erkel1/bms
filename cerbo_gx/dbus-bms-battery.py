@@ -81,7 +81,7 @@ class BmsBatteryService:
         self._modbus_client = None
         self._connected = False
         self._consecutive_errors = 0
-        self._max_errors = 10
+        self._max_errors = 30
 
         # Set up D-Bus main loop
         DBusGMainLoop(set_as_default=True)
@@ -358,7 +358,7 @@ class BmsBatteryService:
 
 
 def main():
-    log.info('Starting BMS Battery D-Bus service v1.1')
+    log.info('Starting BMS Battery D-Bus service v1.2')
     log.info(f'BMS: {BMS_HOST}:{BMS_PORT} unit={BMS_UNIT_ID}')
     log.info(f'Service: {SERVICE_NAME} instance={DEVICE_INSTANCE}')
     log.info('NOTE: SOC/Current/Power NOT published - BMS only provides voltage, temperature, alarms')

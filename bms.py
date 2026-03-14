@@ -4703,6 +4703,21 @@ def main(stdscr):
     startup_self_test(settings, stdscr, data_dir)
     # Signal handler.
     signal.signal(signal.SIGINT, signal_handler)
+    # SIGHUP: hot-reload DVCC settings from battery_monitor.ini without restarting.
+    def sighup_handler(signum, frame):
+        try:
+            import configparser as _cp
+            _cfg = _cp.ConfigParser()
+            _cfg.read(os.path.join(data_dir, 'battery_monitor.ini'))
+            settings['dvcc_max_charge_voltage']    = _cfg.getfloat('DVCC', 'max_charge_voltage',    fallback=settings['dvcc_max_charge_voltage'])
+            settings['dvcc_min_discharge_voltage'] = _cfg.getfloat('DVCC', 'min_discharge_voltage', fallback=settings['dvcc_min_discharge_voltage'])
+            settings['dvcc_max_charge_current']    = _cfg.getfloat('DVCC', 'max_charge_current',    fallback=settings['dvcc_max_charge_current'])
+            settings['dvcc_max_discharge_current'] = _cfg.getfloat('DVCC', 'max_discharge_current', fallback=settings['dvcc_max_discharge_current'])
+            logging.info(f"SIGHUP: DVCC reloaded — max_charge_voltage={settings['dvcc_max_charge_voltage']}V "
+                         f"max_charge_current={settings['dvcc_max_charge_current']}A")
+        except Exception as _e:
+            logging.warning(f'SIGHUP config reload failed: {_e}')
+    signal.signal(signal.SIGHUP, sighup_handler)
     # Watchdog.
     if settings['WatchdogEnabled'] and setup_watchdog(15):
         wd_thread = threading.Thread(target=watchdog_pet_thread, daemon=True)

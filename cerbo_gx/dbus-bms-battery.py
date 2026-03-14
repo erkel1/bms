@@ -28,13 +28,13 @@ BMS_HOST             = '192.168.15.137'
 BMS_PORT             = 502
 BMS_UNIT_ID          = 1
 POLL_INTERVAL_MS     = 2000
-HARD_DISCONNECT_S    = 600   # 10 minutes of silence → safe fallback + Connected=0
+HARD_DISCONNECT_S    = 1800  # 30 minutes of silence → safe fallback + Connected=0
 RECONNECT_READS      = 5     # Consecutive good reads needed after hard disconnect
 NUM_BANKS            = 3
 
 SERVICE_NAME         = 'com.victronenergy.battery.modbus_tcp_bms'
 DEVICE_INSTANCE      = 1
-VERSION              = '2.1'
+VERSION              = '2.2'
 
 log = logging.getLogger('dbus-bms-battery')
 _HARD_THRESH = HARD_DISCONNECT_S * 1000 // POLL_INTERVAL_MS  # errors before hard disconnect

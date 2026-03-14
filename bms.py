@@ -728,6 +728,16 @@ def read_ntc_sensors(ip, modbus_port, query_delay, num_channels, scaling_factor,
             # Connect
             s.connect((effective_ip, effective_port))
             
+            # Drain any stale data the gateway may have buffered from a
+            # previous slave response before sending this query.
+            s.settimeout(0.05)
+            try:
+                while s.recv(256):
+                    pass
+            except (socket.timeout, OSError):
+                pass
+            s.settimeout(5)
+            
             # Send query
             s.send(query)
             
@@ -764,7 +774,13 @@ def read_ntc_sensors(ip, modbus_port, query_delay, num_channels, scaling_factor,
             # Validate response length matches expected
             if len(response) != expected_response_length:
                 logging.warning(f"Response length mismatch for slave {slave_addr}: got {len(response)}, expected {expected_response_length}")
-                # Don't fail on length mismatch, let CRC validation handle it
+                if len(response) > expected_response_length:
+                    # Shared RS485-TCP gateway sent extra bytes (next slave's response
+                    # leaked into this read). Valid data is always the FIRST N bytes.
+                    candidate = response[:expected_response_length]
+                    if modbus_crc(candidate[:-2]) == candidate[-2:]:
+                        logging.debug(f"Trimmed {len(response) - expected_response_length} trailing bytes from slave {slave_addr} response")
+                        response = candidate
             
             # Validate CRC
             calc_crc = modbus_crc(response[:-2])

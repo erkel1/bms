@@ -3736,6 +3736,15 @@ def update_modbus_registers(settings):
                 registers[323 + i] = int(summary['min'] * 10)     # Bank min temp (decicelsius)
                 registers[326 + i] = int(summary['max'] * 10)     # Bank max temp (decicelsius)
 
+    # Registers 330-331: AllowToCharge / AllowToDischarge
+    # Pi controls these based on alarm state so the thin Cerbo driver can
+    # blindly publish them without needing local decision logic.
+    high_v_alarm = any('high voltage' in a.lower() or 'high_voltage' in a.lower() for a in alerts)
+    low_v_alarm  = any('low voltage'  in a.lower() or 'low_voltage'  in a.lower() for a in alerts)
+    bms_error    = system_status in ('Error', 'Alert')
+    registers[330] = 0 if (high_v_alarm or bms_error) else 1  # AllowToCharge
+    registers[331] = 0 if (low_v_alarm  or bms_error) else 1  # AllowToDischarge
+
     # Store in global cache
     modbus_registers = registers
     

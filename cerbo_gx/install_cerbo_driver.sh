@@ -28,6 +28,18 @@ echo "Cerbo GX IP: ${CERBO_IP}"
 echo "Driver file: ${DRIVER_FILE}"
 echo ""
 
+# --check: only deploy if the deployed file differs from repo
+if [ "${1}" = "--check" ] || [ "${2}" = "--check" ]; then
+    REMOTE_MD5=$(sshpass -p "${CERBO_PASS}" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=5 root@${CERBO_IP} \
+        "md5sum /data/dbus-bms-battery/dbus-bms-battery.py 2>/dev/null | cut -d' ' -f1" 2>/dev/null)
+    LOCAL_MD5=$(md5sum "${DRIVER_FILE}" | cut -d' ' -f1)
+    if [ "${REMOTE_MD5}" = "${LOCAL_MD5}" ]; then
+        echo "Cerbo driver up to date (${LOCAL_MD5})"
+        exit 0
+    fi
+    echo "Driver differs (local=${LOCAL_MD5} remote=${REMOTE_MD5}) — deploying..."
+fi
+
 # Check driver file exists
 if [ ! -f "${DRIVER_FILE}" ]; then
     echo "ERROR: Driver file not found: ${DRIVER_FILE}"

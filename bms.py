@@ -3571,7 +3571,12 @@ def create_modbus_datastore(num_banks):
     
     # Create server context with single slave
     context = ModbusServerContext(devices=slave_context, single=True)
-    
+
+    # Safe defaults: AllowToCharge=1, AllowToDischarge=1
+    # These must be 1 at startup so the Cerbo driver never reads
+    # uninitialised zeros and blocks charging/discharging on boot.
+    slave_context.setValues(3, 330, [1, 1])
+
     return context
 
 def update_modbus_registers(settings):

@@ -4943,12 +4943,13 @@ if __name__ == '__main__':
             print(f"Configuration validation failed: {e}")
             sys.exit(1)
     else:
-        # Setup logging.
-        logging.basicConfig(
-            filename=os.path.join(data_dir, 'battery_monitor.log'),
-            level=logging.INFO,
-            format='%(asctime)s - %(message)s'
-        )
+        # Setup logging with rotation: 10MB per file, keep 10 files (~100MB max).
+        from logging.handlers import RotatingFileHandler as _RFH
+        _log_path = os.path.join(data_dir, 'battery_monitor.log')
+        _handler = _RFH(_log_path, maxBytes=10*1024*1024, backupCount=10)
+        _handler.setFormatter(logging.Formatter('%(asctime)s - %(message)s'))
+        logging.getLogger().setLevel(logging.INFO)
+        logging.getLogger().addHandler(_handler)
         # Read config.
         config_parser.read(os.path.join(data_dir, 'battery_monitor.ini'))
         # RRD path.

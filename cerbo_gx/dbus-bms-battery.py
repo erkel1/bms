@@ -34,7 +34,7 @@ NUM_BANKS            = 3
 
 SERVICE_NAME         = 'com.victronenergy.battery.modbus_tcp_bms'
 DEVICE_INSTANCE      = 1
-VERSION              = '2.0'
+VERSION              = '2.1'
 
 log = logging.getLogger('dbus-bms-battery')
 _HARD_THRESH = HARD_DISCONNECT_S * 1000 // POLL_INTERVAL_MS  # errors before hard disconnect
@@ -179,6 +179,12 @@ class BmsBatteryService:
             return True
 
         # ── Successful read ───────────────────────────────────────────────────
+        # Register 260 = data-valid flag: 0 means Pi is still booting / has
+        # no real data yet. Hold last D-Bus values rather than publishing 0V.
+        if main[1] == 0:
+            log.debug('Pi starting up (reg 260=0) — holding last D-Bus values')
+            return True
+
         self._errs       = 0
         self._successes += 1
 

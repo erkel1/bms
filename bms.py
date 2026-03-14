@@ -3612,6 +3612,10 @@ def update_modbus_registers(settings):
     
     # Register 259: Battery voltage (centivolts) - Total voltage
     registers[259] = int(total_voltage * 100)
+    # Register 260: Data-valid flag. 0 = Pi starting up / no data yet.
+    # 1 = bms.py has real voltage data. Thin Cerbo driver checks this
+    # before publishing so it never sends 0V to D-Bus during boot.
+    registers[260] = 1
     
     # Register 261: Current (tenths of amps) - Unknown, set to 0
     registers[261] = 0

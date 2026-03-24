@@ -2876,14 +2876,15 @@ def draw_tui(stdscr, voltages, calibrated_temps, raw_temps, offsets, bank_stats,
     y_offset += 1
     # Last 20 events.
     for event in event_log[-20:]:
-        if y_offset < height and len(event) < width - right_half_x:
-            try:
-                stdscr.addstr(y_offset, right_half_x, event, curses.color_pair(5))
-            except curses.error:
-                logging.warning(f"addstr error for event '{event}'.")
-            y_offset += 1
-        else:
-            logging.warning(f"Skipping event '{event}' - out of bounds.")
+        if y_offset >= height:
+            break
+        max_len = max(1, width - right_half_x - 1)
+        trunc = event[:max_len]
+        try:
+            stdscr.addstr(y_offset, right_half_x, trunc, curses.color_pair(5))
+        except curses.error:
+            pass
+        y_offset += 1
     # Refresh screen.
     stdscr.refresh()
 
@@ -4239,6 +4240,22 @@ def start_web_server(settings):
                 <label style="font-size:.75rem;color:var(--fg2)">Discharge Cable Drop (V)</label>
                 <input type="number" id="dvcc-dcd" min="0" max="5" step="0.01" style="width:70px;background:var(--card2);color:var(--fg);border:1px solid var(--border);border-radius:4px;padding:3px 6px;font-size:.82rem">
             </div>
+            <div style="display:flex;flex-direction:column;gap:4px;min-width:160px">
+                <label style="font-size:.75rem;color:var(--fg2)">Temp Derate Start (°C)</label>
+                <input type="number" id="dvcc-tds" min="20" max="60" step="1" style="width:70px;background:var(--card2);color:var(--fg);border:1px solid var(--border);border-radius:4px;padding:3px 6px;font-size:.82rem">
+            </div>
+            <div style="display:flex;flex-direction:column;gap:4px;min-width:160px">
+                <label style="font-size:.75rem;color:var(--fg2)">Temp Derate End (°C)</label>
+                <input type="number" id="dvcc-tde" min="20" max="70" step="1" style="width:70px;background:var(--card2);color:var(--fg);border:1px solid var(--border);border-radius:4px;padding:3px 6px;font-size:.82rem">
+            </div>
+            <div style="display:flex;flex-direction:column;gap:4px;min-width:160px">
+                <label style="font-size:.75rem;color:var(--fg2)">Cold Cutoff Temp (°C)</label>
+                <input type="number" id="dvcc-cco" min="-10" max="20" step="0.5" style="width:70px;background:var(--card2);color:var(--fg);border:1px solid var(--border);border-radius:4px;padding:3px 6px;font-size:.82rem">
+            </div>
+            <div style="display:flex;flex-direction:column;gap:4px;min-width:160px">
+                <label style="font-size:.75rem;color:var(--fg2)">Cold Stop Temp (°C)</label>
+                <input type="number" id="dvcc-cst" min="-10" max="15" step="0.5" style="width:70px;background:var(--card2);color:var(--fg);border:1px solid var(--border);border-radius:4px;padding:3px 6px;font-size:.82rem">
+            </div>
             <div style="display:flex;align-items:flex-end;gap:8px">
                 <button onclick="saveDvccSettings()" style="padding:5px 14px;font-size:.8rem;background:var(--acc);color:#fff;border:none;border-radius:5px;cursor:pointer">Save</button>
                 <span id="dvcc-status" style="font-size:.75rem;color:var(--fg2)"></span>
@@ -4391,7 +4408,7 @@ def start_web_server(settings):
                 const csMap = {{'Bulk':'ok','Absorption':'warn','Float':'ok','Discharging':'warn','Idle':''}};
                 csEl.className = 'mv ' + (csMap[csState] || '');
                 const mcCs = document.getElementById('mc-cs');
-                if (mcCs) {{ mcCs.style.display=''; mcCs.className='mc '+(csState==='Float'||csState==='Bulk'?'ok':'')+ '-line'; }}
+                if (mcCs) {{ mcCs.style.display=''; const _csCls={{'Float':'ok','Bulk':'ok','Absorption':'warn','Discharging':'warn'}}; mcCs.className='mc '+(_csCls[csState]||'ok')+'-line'; }}
                 const effV = data.effective_charge_current !== undefined ? parseFloat(data.effective_charge_current).toFixed(1) : '—';
                 const effEl = document.getElementById('cs-eff');
                 if (effEl) effEl.textContent = effV;
@@ -4637,6 +4654,14 @@ def start_web_server(settings):
             if(mdc && d.max_discharge_current!==undefined) mdc.value=d.max_discharge_current;
             if(mdv && d.min_discharge_voltage!==undefined) mdv.value=d.min_discharge_voltage;
             if(dcd && d.discharge_cable_drop!==undefined) dcd.value=d.discharge_cable_drop;
+            const tds=document.getElementById('dvcc-tds');
+            const tde=document.getElementById('dvcc-tde');
+            const cco=document.getElementById('dvcc-cco');
+            const cst=document.getElementById('dvcc-cst');
+            if(tds && d.temp_derate_start!==undefined) tds.value=d.temp_derate_start;
+            if(tde && d.temp_derate_end!==undefined) tde.value=d.temp_derate_end;
+            if(cco && d.cold_charge_cutoff!==undefined) cco.value=d.cold_charge_cutoff;
+            if(cst && d.cold_charge_min!==undefined) cst.value=d.cold_charge_min;
             const e=document.getElementById('dvcc-eff-cc');
             if(e) e.textContent=d.effective_charge_current!==undefined?parseFloat(d.effective_charge_current).toFixed(1):'—';
         }}).catch(()=>{{ const s=document.getElementById('dvcc-status'); if(s) s.textContent='Load error'; }});
@@ -4647,12 +4672,23 @@ def start_web_server(settings):
         const mdvEl=document.getElementById('dvcc-mdv');
         const dcdEl=document.getElementById('dvcc-dcd');
         if(!mccEl||!mdcEl||!mdvEl||!dcdEl){{ alert('DVCC fields not found'); return; }}
+        const tdsEl=document.getElementById('dvcc-tds');
+        const tdeEl=document.getElementById('dvcc-tde');
+        const ccoEl=document.getElementById('dvcc-cco');
+        const cstEl=document.getElementById('dvcc-cst');
         const mcc=parseFloat(mccEl.value), mdc=parseFloat(mdcEl.value);
         const mdv=parseFloat(mdvEl.value), dcd=parseFloat(dcdEl.value);
+        const tds=tdsEl?parseFloat(tdsEl.value):NaN, tde=tdeEl?parseFloat(tdeEl.value):NaN;
+        const cco=ccoEl?parseFloat(ccoEl.value):NaN, cst=cstEl?parseFloat(cstEl.value):NaN;
         if([mcc,mdc,mdv,dcd].some(isNaN)){{ alert('All DVCC fields must be valid numbers'); return; }}
+        const payload={{max_charge_current:mcc,max_discharge_current:mdc,min_discharge_voltage:mdv,discharge_cable_drop:dcd}};
+        if(!isNaN(tds)) payload.temp_derate_start=tds;
+        if(!isNaN(tde)) payload.temp_derate_end=tde;
+        if(!isNaN(cco)) payload.cold_charge_cutoff=cco;
+        if(!isNaN(cst)) payload.cold_charge_min=cst;
         fetch('/api/dvcc_settings',{{
             method:'POST',headers:{{'Content-Type':'application/json'}},
-            body:JSON.stringify({{max_charge_current:mcc,max_discharge_current:mdc,min_discharge_voltage:mdv,discharge_cable_drop:dcd}})
+            body:JSON.stringify(payload)
         }}).then(r=>r.json()).then(d=>{{
             if(d.success){{
                 const s=document.getElementById('dvcc-status'); if(s){{s.textContent='✓ Saved';setTimeout(()=>{{s.textContent=''}},3000);}}

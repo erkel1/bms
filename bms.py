@@ -4896,6 +4896,11 @@ def start_web_server(settings):
         try:
             data = request.get_json(force=True)
             ini_path = os.path.join(settings.get('data_dir', '/projects/battery_balancer'), 'battery_monitor.ini')
+            # Pre-validate temp derate cross-constraint
+            _tds_proposed = float(data['temp_derate_start']) if 'temp_derate_start' in data else settings.get('temp_derate_start', 38.0)
+            _tde_proposed = float(data['temp_derate_end']) if 'temp_derate_end' in data else settings.get('temp_derate_end', 45.0)
+            if _tde_proposed <= _tds_proposed:
+                return jsonify({'success': False, 'message': 'temp_derate_end must be greater than temp_derate_start'}), 400
             # Pre-validate cold charge cross-constraint before mutating any settings
             _cc_proposed = float(data['cold_charge_cutoff']) if 'cold_charge_cutoff' in data else settings.get('cold_charge_cutoff', 5.0)
             _cm_proposed = float(data['cold_charge_min']) if 'cold_charge_min' in data else settings.get('cold_charge_min', 0.0)
@@ -5072,6 +5077,7 @@ def main(stdscr):
     global previous_temps, previous_bank_medians, run_count, startup_offsets, startup_median, startup_set, battery_voltages, web_data, balancing_active, BANK_SENSOR_INDICES, alive_timestamp, NUM_BANKS, balancer_failed, balancer_failed_time, balancer_fail_count, balancer_fail_reason, comm_stats, REASONABLE_TEMP_MIN, REASONABLE_TEMP_MAX, CONSECUTIVE_FAILURE_THRESHOLD
     # Load and validate config.
     settings = load_config(data_dir)
+    settings['data_dir'] = data_dir  # Store for use by API handlers
     validate_config(settings)
     # Set config-based globals
     global REASONABLE_TEMP_MIN, REASONABLE_TEMP_MAX, CONSECUTIVE_FAILURE_THRESHOLD
@@ -5376,7 +5382,7 @@ def main(stdscr):
         # Not persisted to INI: relearns each session from zero.
         # Don't learn during active balancing; voltage alert (not balancer_failed) would skew readings
         _volt_alert = any(v is not None and (v <= 0 or v > settings.get('HighVoltageThresholdPerBattery', 21.5) or v < settings.get('LowVoltageThresholdPerBattery', 16.5)) for v in battery_voltages)
-        if not balancing_active and battery_voltages and not _volt_alert:
+        if not balancing_active and battery_voltages and not _volt_alert and not settings.get("_hv_clamp", False):
             _bms_total = sum(v for v in battery_voltages if v > 0)
             _target = settings['dvcc_max_charge_voltage']
             _old_drop = settings.get('cable_drop_compensation', 0.0)

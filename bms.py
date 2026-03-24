@@ -245,6 +245,7 @@ import configparser # Settings reader - loads configuration from the INI file, l
 import logging # Event recorder - writes messages about what's happening to a log file for later review.
 import signal # Shutdown handler - catches when user presses Ctrl+C to stop the program nicely.
 import gc # Memory cleaner - removes unused data from memory to keep the program running smoothly.
+import datetime # Date and time utilities - used for timestamping RRD backups.
 import os # File system manager - handles reading/writing files, like saving calibration data.
 import sys # System controller - manages program exit and command-line arguments.
 import argparse # Command-line argument parser - handles options like --validate-config.
@@ -1105,6 +1106,12 @@ def load_config(data_dir):
         'dvcc_max_charge_current': config_parser.getfloat('DVCC', 'max_charge_current', fallback=200.0),  # Max charge current (A).
         'dvcc_max_discharge_current': config_parser.getfloat('DVCC', 'max_discharge_current', fallback=200.0),  # Max discharge current (A).
         'dvcc_min_discharge_voltage': config_parser.getfloat('DVCC', 'min_discharge_voltage', fallback=49.5),  # Min discharge voltage (V).
+        'cable_drop_compensation': 0.0,  # Always start at 0; auto-relearned each session
+        'discharge_cable_drop': config_parser.getfloat('DVCC', 'discharge_cable_drop', fallback=0.0),
+        'temp_derate_start': config_parser.getfloat('DVCC', 'temp_derate_start', fallback=38.0),
+        'temp_derate_end': config_parser.getfloat('DVCC', 'temp_derate_end', fallback=45.0),
+        'cold_charge_cutoff': config_parser.getfloat('DVCC', 'cold_charge_cutoff', fallback=5.0),
+        'cold_charge_min': config_parser.getfloat('DVCC', 'cold_charge_min', fallback=0.0),
     }
     # Relay mapping for balancing pairs (e.g., bank1-bank2 uses certain relay bits).
     relay_mapping = {}
@@ -1320,20 +1327,22 @@ def setup_hardware(settings):
             try:
                 output = subprocess.check_output(['rrdtool', 'info', RRD_FILE])
                 # Count DS lines in output.
-                ds_count = len([line for line in output.decode().split('\n') if line.startswith('ds[')])
+                ds_count = len([line for line in output.decode().split('\n') if line.startswith('ds[') and '.index ' in line])
                 # Expected: 1 medtemp + num banks.
                 expected_ds = 1 + settings['num_series_banks']
                 if ds_count != expected_ds:
-                    # Mismatch (e.g., config changed)—recreate.
-                    logging.warning(f"RRD database schema mismatch: {ds_count} DS vs expected {expected_ds}. Recreating.")
-                    os.remove(RRD_FILE)
+                    # Mismatch (e.g., config changed)—back up then recreate.
+                    backup = RRD_FILE + '.bak.' + datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
+                    os.rename(RRD_FILE, backup)
+                    logging.warning(f"RRD database schema mismatch: {ds_count} DS vs expected {expected_ds}. Old database backed up to {backup}. Recreating.")
                     create_rrd()
                 else:
                     logging.info("Using existing RRD database with matching schema.")
             except subprocess.CalledProcessError as e:
-                # Info command failed—recreate.
-                logging.error(f"RRD info failed: {e}. Recreating database.")
-                os.remove(RRD_FILE)
+                # Info command failed—back up then recreate.
+                backup = RRD_FILE + '.bak.' + datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
+                os.rename(RRD_FILE, backup)
+                logging.error(f"RRD info failed: {e}. Old database backed up to {backup}. Recreating.")
                 create_rrd()
     except subprocess.CalledProcessError as e:
         logging.error(f"RRD creation failed: {e}")
@@ -1955,7 +1964,8 @@ def set_relay_connection(high, low, settings):
         
         # Reset: Set all relay pins LOW
         if high == 0 and low == 0:
-            for i in range(4):  # Assuming 4 relays
+            num_relays = sum(1 for k in settings if k.startswith('Relay') and k.endswith('_Pin'))
+            for i in range(num_relays):
                 pin = settings[f'Relay{i}_Pin']
                 GPIO.output(pin, GPIO.LOW)
             logging.info("All relays deactivated")
@@ -1967,7 +1977,8 @@ def set_relay_connection(high, low, settings):
             relays = settings['relay_mapping'][pair_key]
             logging.debug(f"Activating relays {relays} for {pair_key}")
             # First, deactivate all relays to ensure clean state
-            for i in range(4):
+            num_relays = sum(1 for k in settings if k.startswith('Relay') and k.endswith('_Pin'))
+            for i in range(num_relays):
                 pin = settings[f'Relay{i}_Pin']
                 GPIO.output(pin, GPIO.LOW)
             # Activate specific relays
@@ -2766,7 +2777,8 @@ def draw_tui(stdscr, voltages, calibrated_temps, raw_temps, offsets, bank_stats,
     if y_offset < height:
         valid_count = len([t for t in calibrated_temps if t is not None])
         total_count = len(calibrated_temps)
-        row = f"Valid: {valid_count}/{total_count} ({valid_count*100//total_count}%) | Updated: {time.strftime('%H:%M:%S')}"
+        pct = f"{valid_count*100/total_count:.1f}" if total_count > 0 else "0.0"
+        row = f"Valid: {valid_count}/{total_count} ({pct}%) | Updated: {time.strftime('%H:%M:%S')}"
         if len(row) < right_half_x:
             try:
                 stdscr.addstr(y_offset, 0, row, curses.color_pair(7))
@@ -3734,14 +3746,19 @@ def update_modbus_registers(settings):
         if i < 16:  # Max 16 strings supported
             registers[1306 + i] = int(voltage * 100)
     
-    # DVCC limits from config (registers 305-308, Victron standard)
-    # Reg 305: Max charge voltage (decivolts, scale=10)
-    registers[305] = int(settings.get('dvcc_max_charge_voltage', 61.0) * 10)
-    # Reg 306: Min discharge voltage (decivolts, scale=10)
-    registers[306] = int(settings.get('dvcc_min_discharge_voltage', 49.5) * 10)
-    # Reg 307: Max charge current (deciamps, scale=10)
-    registers[307] = int(settings.get('dvcc_max_charge_current', 200.0) * 10)
-    # Reg 308: Max discharge current (deciamps, scale=10)
+    # DVCC limits (registers 305-308, Victron standard)
+    # Reg 305: Max charge voltage - Feature 3: HV clamp overrides CVL
+    if settings.get('_hv_clamp', False):
+        _cerbo_cv = settings.get('_hv_clamped_cvl', settings.get('dvcc_max_charge_voltage', 61.0))
+    else:
+        _cerbo_cv = settings.get('dvcc_max_charge_voltage', 61.0) + settings.get('cable_drop_compensation', 0.0)
+    registers[305] = int(min(63.0, _cerbo_cv) * 10)
+    # Reg 306: Min discharge voltage with manual cable drop (Feature 4)
+    _cerbo_blv = settings.get('dvcc_min_discharge_voltage', 49.5) - settings.get('discharge_cable_drop', 0.0)
+    registers[306] = int(max(0, _cerbo_blv) * 10)
+    # Reg 307: Max charge current - temp-derated effective current (Features 1+2)
+    registers[307] = int(settings.get('_effective_charge_current', settings.get('dvcc_max_charge_current', 200.0)) * 10)
+    # Reg 308: Max discharge current
     registers[308] = int(settings.get('dvcc_max_discharge_current', 200.0) * 10)
 
     # Bank temperature registers (318-329)
@@ -3893,7 +3910,10 @@ def start_mdns_advertisement(port, unit_id=1):
         # Kill any existing mDNS process
         if mdns_process and mdns_process.poll() is None:
             mdns_process.terminate()
-            mdns_process.wait()
+            try:
+                mdns_process.wait(timeout=5)
+            except Exception:
+                mdns_process.kill()
         
         # Start mDNS advertisement
         # Service type: _modbus._tcp (standard Modbus TCP service)
@@ -4017,6 +4037,15 @@ def start_web_server(settings):
     # Create app.
     app = Flask(__name__)
     # Route for main page.
+    @app.route('/chart.min.js')
+    def serve_chartjs():
+        import os as _os
+        _path = _os.path.join(settings.get('data_dir', '/projects/battery_balancer'), 'chart.min.js')
+        if _os.path.exists(_path):
+            with open(_path, 'r') as _f:
+                return _f.read(), 200, {'Content-Type': 'application/javascript'}
+        return '// Chart.js not found', 200, {'Content-Type': 'application/javascript'}
+
     @app.route('/')
     def index():
         # Dynamic datasets for charts.
@@ -4035,9 +4064,8 @@ def start_web_server(settings):
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>BMS Dashboard</title>
-    <link rel="preconnect" href="https://fonts.googleapis.com">
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
-    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.5.0"></script>
+    <!-- Google Fonts removed: self-hosted fallback -->
+    <script src="/chart.min.js"></script>
     <style>
         :root {{
             --bg:#080f1a;--bg2:#0d1829;--card:#111d2e;--card2:#16243a;
@@ -4185,6 +4213,38 @@ def start_web_server(settings):
         <div class="mc" id="mc-bm"><div class="ml">Balancing</div><div class="mv ok" id="bm">—</div><div class="ms" id="bms2">—</div></div>
         <div class="mc ok-line" id="mc-ac"><div class="ml">Active Alerts</div><div class="mv ok" id="ac">—</div><div class="ms">System health</div></div>
         <div class="mc ok-line" id="mc-at"><div class="ml">Avg Temperature</div><div class="mv ok" id="at">—</div><div class="ms">All sensors</div></div>
+        <div class="mc ok-line" id="mc-cv"><div class="ml">Charge Voltage</div><div class="mv ok" id="cv-display">—</div><div class="ms" style="display:flex;flex-direction:column;gap:5px"><div style="display:flex;align-items:center;gap:4px"><span style="font-size:.7rem;color:var(--fg2);min-width:44px">Target</span><input type="number" id="cv-input" min="0.1" max="63" step="0.1" style="width:58px;background:var(--surface2);color:var(--fg);border:1px solid var(--border);border-radius:4px;padding:2px 4px;font-size:.75rem" title="Desired voltage at battery terminals"><span style="font-size:.7rem;color:var(--fg3)">V</span><button onclick="setChargeVoltage()" style="padding:2px 7px;font-size:.72rem;background:var(--acc);color:#fff;border:none;border-radius:4px;cursor:pointer">Set</button></div><div style="font-size:.7rem;color:var(--fg2)">Drop: <span id="cv-drop-display" style="color:var(--fg)">—</span> <span style="color:var(--fg3)">(auto)</span> &nbsp;→&nbsp; <span id="cv-cerbo-display" style="color:var(--warn)">—</span> to Cerbo <span id="cv-cap-warn" style="display:none;color:var(--bad);font-size:.7rem" title="Target voltage is unreachable - increase target or reduce cable resistance">⚠ CAP</span> <span id="cv-cap-warn" style="display:none;color:var(--bad);font-size:.7rem" title="Target voltage is unreachable - increase target or reduce cable resistance">⚠ CAP</span></div></div></div>
+    </div>
+    <!-- Charge State + DVCC Settings -->
+    <div id="mc-cs" class="mc ok-line" style="display:none"><div class="ml">Charge State</div><div class="mv ok" id="cs-display">—</div><div class="ms" id="cs-sub">Effective: <span id="cs-eff">—</span>A</div></div>
+    <div class="card" style="margin-bottom:16px" id="dvcc-card">
+        <div class="sh">DVCC Settings</div>
+        <div style="display:flex;flex-wrap:wrap;gap:18px;padding:4px 0 8px 0">
+            <div style="display:flex;flex-direction:column;gap:4px;min-width:160px">
+                <label style="font-size:.75rem;color:var(--fg2)">Max Charge Current (A)</label>
+                <div style="display:flex;align-items:center;gap:6px">
+                    <input type="number" id="dvcc-mcc" min="0" max="1000" step="1" style="width:70px;background:var(--card2);color:var(--fg);border:1px solid var(--border);border-radius:4px;padding:3px 6px;font-size:.82rem">
+                    <span style="font-size:.72rem;color:var(--fg3)">(eff: <span id="dvcc-eff-cc">—</span>A)</span>
+                </div>
+            </div>
+            <div style="display:flex;flex-direction:column;gap:4px;min-width:160px">
+                <label style="font-size:.75rem;color:var(--fg2)">Max Discharge Current (A)</label>
+                <input type="number" id="dvcc-mdc" min="0" max="1000" step="1" style="width:70px;background:var(--card2);color:var(--fg);border:1px solid var(--border);border-radius:4px;padding:3px 6px;font-size:.82rem">
+            </div>
+            <div style="display:flex;flex-direction:column;gap:4px;min-width:160px">
+                <label style="font-size:.75rem;color:var(--fg2)">Min Discharge Voltage (V)</label>
+                <input type="number" id="dvcc-mdv" min="0" max="63" step="0.1" style="width:70px;background:var(--card2);color:var(--fg);border:1px solid var(--border);border-radius:4px;padding:3px 6px;font-size:.82rem">
+            </div>
+            <div style="display:flex;flex-direction:column;gap:4px;min-width:160px">
+                <label style="font-size:.75rem;color:var(--fg2)">Discharge Cable Drop (V)</label>
+                <input type="number" id="dvcc-dcd" min="0" max="5" step="0.01" style="width:70px;background:var(--card2);color:var(--fg);border:1px solid var(--border);border-radius:4px;padding:3px 6px;font-size:.82rem">
+            </div>
+            <div style="display:flex;align-items:flex-end;gap:8px">
+                <button onclick="saveDvccSettings()" style="padding:5px 14px;font-size:.8rem;background:var(--acc);color:#fff;border:none;border-radius:5px;cursor:pointer">Save</button>
+                <span id="dvcc-status" style="font-size:.75rem;color:var(--fg2)"></span>
+            </div>
+        </div>
+        <div style="font-size:.72rem;color:var(--fg3);margin-top:2px">HV clamp: <span id="dvcc-hv-clamp" style="color:var(--fg2)">No</span>&nbsp;|&nbsp;Cerbo BLV: <span id="dvcc-blv">—</span>V</div>
     </div>
     <!-- Battery Banks -->
     <div class="sh">Battery Banks</div>
@@ -4323,6 +4383,22 @@ def start_web_server(settings):
             acEl.className = 'mv ' + acCls;
             document.getElementById('mc-ac').className = 'mc ' + acCls + '-line';
 
+            // Charge State (Feature 6)
+            const csEl = document.getElementById('cs-display');
+            if (csEl) {{
+                const csState = data.charge_state || 'Idle';
+                csEl.textContent = csState;
+                const csMap = {{'Bulk':'ok','Absorption':'warn','Float':'ok','Discharging':'warn','Idle':''}};
+                csEl.className = 'mv ' + (csMap[csState] || '');
+                const mcCs = document.getElementById('mc-cs');
+                if (mcCs) {{ mcCs.style.display=''; mcCs.className='mc '+(csState==='Float'||csState==='Bulk'?'ok':'')+ '-line'; }}
+                const effV = data.effective_charge_current !== undefined ? parseFloat(data.effective_charge_current).toFixed(1) : '—';
+                const effEl = document.getElementById('cs-eff');
+                if (effEl) effEl.textContent = effV;
+                const sub = document.getElementById('cs-sub');
+                if (sub) sub.innerHTML = 'Effective: <span id="cs-eff">' + effV + '</span>A' + (data.hv_clamp ? ' <span style="color:var(--bad);font-size:.7rem">HV CLAMP</span>' : '');
+            }}
+
             // Avg temp
             const vt = data.temperatures.filter(t => t !== null);
             const avg = vt.length ? vt.reduce((a, b) => a + b, 0) / vt.length : null;
@@ -4381,6 +4457,40 @@ def start_web_server(settings):
                 ad.innerHTML = '<div class="noa"><span>✓</span> All systems normal</div>';
             }}
             document.getElementById('balance-btn').disabled = data.balancing || data.alerts.length > 0;
+            // Update DVCC panel
+            const hvEl = document.getElementById('dvcc-hv-clamp');
+            if (hvEl && data.hv_clamp !== undefined) {{
+                hvEl.textContent = data.hv_clamp ? 'YES '+parseFloat(data.hv_clamped_cvl||0).toFixed(2)+'V' : 'No';
+                hvEl.style.color = data.hv_clamp ? 'var(--bad)' : 'var(--fg2)';
+            }}
+            const blvEl = document.getElementById('dvcc-blv');
+            if (blvEl && data.dvcc_min_discharge_voltage !== undefined) {{
+                blvEl.textContent = (data.dvcc_min_discharge_voltage - (data.discharge_cable_drop||0)).toFixed(2);
+            }}
+            const dEffEl = document.getElementById('dvcc-eff-cc');
+            if (dEffEl && data.effective_charge_current !== undefined) {{
+                dEffEl.textContent = parseFloat(data.effective_charge_current).toFixed(1);
+            }}
+            // Auto-refresh cable drop display
+            if (data.cable_drop_compensation !== undefined && data.cerbo_voltage !== undefined) {{
+                updateCvDisplay(parseFloat(data.charge_voltage || 60.3), parseFloat(data.cable_drop_compensation), parseFloat(data.cerbo_voltage));
+            }}
+            // Show cap warning if target is unreachable
+            const capWarn = document.getElementById('cv-cap-warn');
+            if (capWarn) {{
+                const isAtCap = data.cerbo_voltage !== undefined && data.cerbo_voltage >= 62.95;
+                capWarn.style.display = isAtCap ? '' : 'none';
+            }}
+            // Auto-refresh cable drop display
+            if (data.cable_drop_compensation !== undefined && data.cerbo_voltage !== undefined) {{
+                updateCvDisplay(parseFloat(data.charge_voltage || 60.3), parseFloat(data.cable_drop_compensation), parseFloat(data.cerbo_voltage));
+            }}
+            // Show cap warning if target is unreachable
+            const capWarn = document.getElementById('cv-cap-warn');
+            if (capWarn) {{
+                const isAtCap = data.cerbo_voltage !== undefined && data.cerbo_voltage >= 62.95;
+                capWarn.style.display = isAtCap ? '' : 'none';
+            }}
 
         }}).catch(() => {{
             document.getElementById('sbadge').className = 'badge bad';
@@ -4493,15 +4603,80 @@ def start_web_server(settings):
         }});
     }});
 
+    // ── Charge Voltage ────────────────────────────────────────────
+    function updateCvDisplay(cv, drop, cerboV) {{
+        document.getElementById('cv-display').textContent = cv.toFixed(1) + 'V';
+        document.getElementById('cv-input').value = cv.toFixed(1);
+        const dropEl = document.getElementById('cv-drop-display');
+        const cerboEl = document.getElementById('cv-cerbo-display');
+        dropEl.textContent = drop.toFixed(3) + 'V';
+        cerboEl.textContent = cerboV.toFixed(2) + 'V';
+        cerboEl.style.color = drop > 0.01 ? 'var(--warn)' : 'var(--fg2)';
+    }}
+    function loadChargeVoltage() {{
+        fetch('/api/charge_voltage').then(r => r.json()).then(d => {{
+            updateCvDisplay(parseFloat(d.charge_voltage), parseFloat(d.cable_drop_compensation || 0), parseFloat(d.cerbo_voltage || d.charge_voltage));
+        }}).catch(() => {{ document.getElementById('cv-display').textContent = 'ERR'; }});
+    }}
+    function setChargeVoltage() {{
+        const cv = parseFloat(document.getElementById('cv-input').value);
+        if (isNaN(cv) || cv <= 0 || cv > 63) {{ alert('Target voltage must be between 0.1 and 63V'); return; }}
+        fetch('/api/charge_voltage', {{
+            method: 'POST',
+            headers: {{'Content-Type': 'application/json'}},
+            body: JSON.stringify({{charge_voltage: cv}})
+        }}).then(r => r.json()).then(d => {{
+            if (d.success) {{ updateCvDisplay(parseFloat(d.charge_voltage), parseFloat(d.cable_drop_compensation), parseFloat(d.cerbo_voltage)); }}
+            else {{ alert('\u26a0 ' + (d.message || 'Failed to set charge voltage')); }}
+        }}).catch(e => alert('Error: ' + e.message));
+    }}
+
     // ── Wiring ────────────────────────────────────────────────────
     document.getElementById('refresh-btn').addEventListener('click', () => {{ rIn = 5; updateStatus(); }});
     document.getElementById('balance-btn').addEventListener('click', initiateBalance);
     document.getElementById('fab').addEventListener('click', () => {{ rIn = 5; updateStatus(); }});
 
+    // DVCC Settings functions (Feature 5)
+    function loadDvccSettings() {{
+        fetch('/api/dvcc_settings').then(r => r.json()).then(d => {{
+            const mcc=document.getElementById('dvcc-mcc');
+            const mdc=document.getElementById('dvcc-mdc');
+            const mdv=document.getElementById('dvcc-mdv');
+            const dcd=document.getElementById('dvcc-dcd');
+            if(mcc && d.max_charge_current!==undefined) mcc.value=d.max_charge_current;
+            if(mdc && d.max_discharge_current!==undefined) mdc.value=d.max_discharge_current;
+            if(mdv && d.min_discharge_voltage!==undefined) mdv.value=d.min_discharge_voltage;
+            if(dcd && d.discharge_cable_drop!==undefined) dcd.value=d.discharge_cable_drop;
+            const e=document.getElementById('dvcc-eff-cc');
+            if(e) e.textContent=d.effective_charge_current!==undefined?parseFloat(d.effective_charge_current).toFixed(1):'—';
+        }}).catch(()=>{{ const s=document.getElementById('dvcc-status'); if(s) s.textContent='Load error'; }});
+    }}
+    function saveDvccSettings() {{
+        const mccEl=document.getElementById('dvcc-mcc');
+        const mdcEl=document.getElementById('dvcc-mdc');
+        const mdvEl=document.getElementById('dvcc-mdv');
+        const dcdEl=document.getElementById('dvcc-dcd');
+        if(!mccEl||!mdcEl||!mdvEl||!dcdEl){{ alert('DVCC fields not found'); return; }}
+        const mcc=parseFloat(mccEl.value), mdc=parseFloat(mdcEl.value);
+        const mdv=parseFloat(mdvEl.value), dcd=parseFloat(dcdEl.value);
+        if([mcc,mdc,mdv,dcd].some(isNaN)){{ alert('All DVCC fields must be valid numbers'); return; }}
+        fetch('/api/dvcc_settings',{{
+            method:'POST',headers:{{'Content-Type':'application/json'}},
+            body:JSON.stringify({{max_charge_current:mcc,max_discharge_current:mdc,min_discharge_voltage:mdv,discharge_cable_drop:dcd}})
+        }}).then(r=>r.json()).then(d=>{{
+            if(d.success){{
+                const s=document.getElementById('dvcc-status'); if(s){{s.textContent='✓ Saved';setTimeout(()=>{{s.textContent=''}},3000);}}
+                loadDvccSettings();
+            }}else{{ alert('⚠ '+(d.message||'Failed to save')); }}
+        }}).catch(e=>alert('Error: '+e.message));
+    }}
+
     // Initial load
     updateStatus();
     updateChart();
     updateCommStats();
+    loadChargeVoltage();
+    loadDvccSettings();
     setInterval(updateChart, 30000);
     setInterval(updateCommStats, 10000);
 </script>
@@ -4528,7 +4703,22 @@ def start_web_server(settings):
                     'low_threshold': settings['low_threshold'],
                     'high_voltage_threshold': settings['HighVoltageThresholdPerBattery'],
                     'low_voltage_threshold': settings['LowVoltageThresholdPerBattery'],
-                    'sensors_per_battery': settings['sensors_per_battery']
+                    'sensors_per_battery': settings['sensors_per_battery'],
+                    'charge_state': web_data.get('charge_state', 'Idle'),
+                    'effective_charge_current': web_data.get('effective_charge_current', settings.get('dvcc_max_charge_current', 200.0)),
+                    'hv_clamp': web_data.get('hv_clamp', False),
+                    'hv_clamped_cvl': web_data.get('hv_clamped_cvl', 0.0),
+                    'dvcc_max_charge_current': settings.get('dvcc_max_charge_current', 200.0),
+                    'dvcc_max_discharge_current': settings.get('dvcc_max_discharge_current', 200.0),
+                    'dvcc_min_discharge_voltage': settings.get('dvcc_min_discharge_voltage', 49.5),
+                    'discharge_cable_drop': settings.get('discharge_cable_drop', 0.0),
+                    'cable_drop_compensation': settings.get('cable_drop_compensation', 0.0),
+                    'cerbo_voltage': round(min(63.0, settings.get('dvcc_max_charge_voltage', 60.3) + settings.get('cable_drop_compensation', 0.0)), 2),
+                    'charge_voltage': settings.get('dvcc_max_charge_voltage', 60.3),
+                    'cable_drop_compensation': settings.get('cable_drop_compensation', 0.0),
+                    'cerbo_voltage': round(min(63.0, settings.get('dvcc_max_charge_voltage', 60.3) + settings.get('cable_drop_compensation', 0.0)), 2),
+                    'charge_voltage': settings.get('dvcc_max_charge_voltage', 60.3),
+                    'web_server_healthy': web_data.get('_web_server_healthy', True),
                 }
             return jsonify(response)
         except Exception as e:
@@ -4621,6 +4811,135 @@ def start_web_server(settings):
             logging.error(f'Error in /api/cerbo_integration: {e}\n{traceback.format_exc()}')
             return jsonify({'error': str(e)}), 500
 
+    @app.route('/api/charge_voltage', methods=['GET', 'POST'])
+    def api_charge_voltage():
+        drop = settings.get('cable_drop_compensation', 0.0)
+        cv   = settings.get('dvcc_max_charge_voltage', 61.0)
+        if request.method == 'GET':
+            return jsonify({
+                'charge_voltage': cv,
+                'cable_drop_compensation': drop,
+                'cerbo_voltage': round(min(63.0, cv + drop), 2)
+            })
+        try:
+            data   = request.get_json(force=True)
+            new_cv = float(data['charge_voltage']) if 'charge_voltage' in data else cv
+            if new_cv <= 0 or new_cv > 63:
+                return jsonify({'success': False, 'message': 'Charge voltage must be between 0.1 and 63V'}), 400
+            settings['dvcc_max_charge_voltage'] = new_cv
+            # Reset cable drop to 0 when target changes so auto-compensation relearns from scratch
+            settings['cable_drop_compensation'] = 0.0
+            ini_path = os.path.join(settings.get('data_dir', '/projects/battery_balancer'), 'battery_monitor.ini')
+            try:
+                _cfg = configparser.ConfigParser(comment_prefixes=(';', '#'))
+                _cfg.read(ini_path)
+                if not _cfg.has_section('DVCC'):
+                    _cfg.add_section('DVCC')
+                _cfg.set('DVCC', 'max_charge_voltage', str(new_cv))
+                _cfg.set('DVCC', 'cable_drop_compensation', '0.0')
+                with open(ini_path, 'w') as _f:
+                    _cfg.write(_f)
+            except Exception as _e:
+                logging.warning(f'Could not persist charge voltage to INI: {_e}')
+            cerbo_v = round(min(63.0, new_cv + settings.get('cable_drop_compensation', 0.0)), 2)
+            logging.info(f'Charge voltage target set to {new_cv}V (cable drop auto-reset to 0, will re-learn)')
+            return jsonify({'success': True, 'charge_voltage': new_cv, 'cable_drop_compensation': 0.0, 'cerbo_voltage': cerbo_v})
+        except Exception as e:
+            logging.error(f'Error in /api/charge_voltage: {e}\n{traceback.format_exc()}')
+            return jsonify({'error': str(e)}), 500
+
+    @app.route('/api/dvcc_settings', methods=['GET', 'POST'])
+    def api_dvcc_settings():
+        if request.method == 'GET':
+            return jsonify({
+                'max_charge_current': settings.get('dvcc_max_charge_current', 200.0),
+                'max_discharge_current': settings.get('dvcc_max_discharge_current', 200.0),
+                'min_discharge_voltage': settings.get('dvcc_min_discharge_voltage', 49.5),
+                'discharge_cable_drop': settings.get('discharge_cable_drop', 0.0),
+                'effective_charge_current': settings.get('_effective_charge_current', settings.get('dvcc_max_charge_current', 200.0)),
+                'temp_derate_start': settings.get('temp_derate_start', 38.0),
+                'temp_derate_end': settings.get('temp_derate_end', 45.0),
+                'cold_charge_cutoff': settings.get('cold_charge_cutoff', 5.0),
+                'cold_charge_min': settings.get('cold_charge_min', 0.0),
+            })
+        try:
+            data = request.get_json(force=True)
+            ini_path = os.path.join(settings.get('data_dir', '/projects/battery_balancer'), 'battery_monitor.ini')
+            changed = []
+            if 'max_charge_current' in data:
+                val = float(data['max_charge_current'])
+                if val < 0 or val > 1000:
+                    return jsonify({'success': False, 'message': 'max_charge_current must be 0-1000A'}), 400
+                settings['dvcc_max_charge_current'] = val
+                settings['_effective_charge_current'] = min(val, settings.get('_effective_charge_current', val))
+                changed.append(('max_charge_current', str(val)))
+            if 'max_discharge_current' in data:
+                val = float(data['max_discharge_current'])
+                if val < 0 or val > 1000:
+                    return jsonify({'success': False, 'message': 'max_discharge_current must be 0-1000A'}), 400
+                settings['dvcc_max_discharge_current'] = val
+                changed.append(('max_discharge_current', str(val)))
+            if 'min_discharge_voltage' in data:
+                val = float(data['min_discharge_voltage'])
+                if val < 0 or val > 63:
+                    return jsonify({'success': False, 'message': 'min_discharge_voltage must be 0-63V'}), 400
+                settings['dvcc_min_discharge_voltage'] = val
+                changed.append(('min_discharge_voltage', str(val)))
+            if 'discharge_cable_drop' in data:
+                val = float(data['discharge_cable_drop'])
+                if val < 0 or val > 5:
+                    return jsonify({'success': False, 'message': 'discharge_cable_drop must be 0-5V'}), 400
+                settings['discharge_cable_drop'] = val
+                changed.append(('discharge_cable_drop', str(val)))
+            if 'temp_derate_start' in data:
+                val = float(data['temp_derate_start'])
+                settings['temp_derate_start'] = val
+                changed.append(('temp_derate_start', str(val)))
+            if 'temp_derate_end' in data:
+                val = float(data['temp_derate_end'])
+                settings['temp_derate_end'] = val
+                changed.append(('temp_derate_end', str(val)))
+            if 'cold_charge_cutoff' in data:
+                val = float(data['cold_charge_cutoff'])
+                settings['cold_charge_cutoff'] = val
+                changed.append(('cold_charge_cutoff', str(val)))
+            if 'cold_charge_min' in data:
+                val = float(data['cold_charge_min'])
+                settings['cold_charge_min'] = val
+                changed.append(('cold_charge_min', str(val)))
+            # Validate cold charge ordering: cutoff must be > min
+            _cc = settings.get('cold_charge_cutoff', 5.0)
+            _cm = settings.get('cold_charge_min', 0.0)
+            if _cc <= _cm:
+                return jsonify({'success': False, 'message': 'cold_charge_cutoff must be greater than cold_charge_min'}), 400
+            if changed:
+                try:
+                    _cfg = configparser.ConfigParser(comment_prefixes=(';', '#'))
+                    _cfg.read(ini_path)
+                    if not _cfg.has_section('DVCC'):
+                        _cfg.add_section('DVCC')
+                    for _k, _v in changed:
+                        _cfg.set('DVCC', _k, _v)
+                    with open(ini_path, 'w') as _f:
+                        _cfg.write(_f)
+                except Exception as _e:
+                    logging.warning(f'Could not persist DVCC settings: {_e}')
+            logging.info(f'DVCC settings updated: {dict(changed)}')
+            return jsonify({
+                'success': True,
+                'max_charge_current': settings.get('dvcc_max_charge_current', 200.0),
+                'max_discharge_current': settings.get('dvcc_max_discharge_current', 200.0),
+                'min_discharge_voltage': settings.get('dvcc_min_discharge_voltage', 49.5),
+                'discharge_cable_drop': settings.get('discharge_cable_drop', 0.0),
+                'temp_derate_start': settings.get('temp_derate_start', 38.0),
+                'temp_derate_end': settings.get('temp_derate_end', 45.0),
+                'cold_charge_cutoff': settings.get('cold_charge_cutoff', 5.0),
+                'cold_charge_min': settings.get('cold_charge_min', 0.0),
+            })
+        except Exception as e:
+            logging.error(f'Error in /api/dvcc_settings: {e}\n{traceback.format_exc()}')
+            return jsonify({'error': str(e)}), 500
+
     # Before each request: Auth check and CORS preflight.
     @app.before_request
     def before_request():
@@ -4648,10 +4967,45 @@ def start_web_server(settings):
         except Exception as e:
             logging.error(f"Web server error: {e}\n{traceback.format_exc()}")
     # Start thread.
-    server_thread = threading.Thread(target=run_app)
+    server_thread = threading.Thread(target=run_app, name='flask-web')
     server_thread.daemon = True
     server_thread.start()
+    settings['_flask_thread'] = server_thread
+    settings['_flask_run_app'] = run_app
     logging.info(f"Web server started on {settings['host']}:{settings['web_port']}")
+
+    # Feature 7: Web server watchdog
+    def web_server_watchdog():
+        import time as _wt
+        _wt.sleep(60)
+        while True:
+            try:
+                _thr = settings.get('_flask_thread')
+                if _thr is not None and not _thr.is_alive():
+                    logging.warning('Web watchdog: Flask thread died, restarting...')
+                    with data_lock:
+                        web_data['_web_server_healthy'] = False
+                    _new_thr = threading.Thread(target=run_app, name='flask-web-restarted')
+                    _new_thr.daemon = True
+                    _new_thr.start()
+                    settings['_flask_thread'] = _new_thr
+                    _wt.sleep(5)
+                    if _new_thr.is_alive():
+                        logging.info('Web watchdog: Flask restarted successfully.')
+                        with data_lock:
+                            web_data['_web_server_healthy'] = True
+                    else:
+                        logging.error('Web watchdog: Flask restart FAILED.')
+                else:
+                    with data_lock:
+                        web_data['_web_server_healthy'] = True
+            except Exception as _e:
+                logging.error(f'Web watchdog error: {_e}')
+            _wt.sleep(30)
+
+    _web_wd = threading.Thread(target=web_server_watchdog, name='web-watchdog', daemon=True)
+    _web_wd.start()
+    logging.info('Web server watchdog started.')
 
 def main(stdscr):
     """
@@ -4705,6 +5059,11 @@ def main(stdscr):
     web_data['data_valid'] = False  # Set True after first real voltage read
     web_data['temperatures'] = [None] * total_channels
     web_data['bank_summaries'] = [{'median': 0.0, 'min': 0.0, 'max': 0.0, 'invalid': 0} for _ in range(NUM_BANKS)]
+    web_data['charge_state'] = 'Idle'
+    web_data['effective_charge_current'] = settings.get('dvcc_max_charge_current', 200.0)
+    web_data['hv_clamp'] = False
+    web_data['hv_clamped_cvl'] = 0.0
+    web_data['_web_server_healthy'] = True
     # Build indices.
     for bat in range(number_parallel):
         base = bat * sensors_per_battery
@@ -4748,6 +5107,12 @@ def main(stdscr):
             settings['dvcc_min_discharge_voltage'] = _cfg.getfloat('DVCC', 'min_discharge_voltage', fallback=settings['dvcc_min_discharge_voltage'])
             settings['dvcc_max_charge_current']    = _cfg.getfloat('DVCC', 'max_charge_current',    fallback=settings['dvcc_max_charge_current'])
             settings['dvcc_max_discharge_current'] = _cfg.getfloat('DVCC', 'max_discharge_current', fallback=settings['dvcc_max_discharge_current'])
+            # cable_drop_compensation intentionally not reloaded — relearned each session
+            settings['discharge_cable_drop']       = _cfg.getfloat('DVCC', 'discharge_cable_drop', fallback=settings.get('discharge_cable_drop', 0.0))
+            settings['temp_derate_start']          = _cfg.getfloat('DVCC', 'temp_derate_start', fallback=settings.get('temp_derate_start', 38.0))
+            settings['temp_derate_end']            = _cfg.getfloat('DVCC', 'temp_derate_end', fallback=settings.get('temp_derate_end', 45.0))
+            settings['cold_charge_cutoff']         = _cfg.getfloat('DVCC', 'cold_charge_cutoff', fallback=settings.get('cold_charge_cutoff', 5.0))
+            settings['cold_charge_min']            = _cfg.getfloat('DVCC', 'cold_charge_min', fallback=settings.get('cold_charge_min', 0.0))
             logging.info(f"SIGHUP: DVCC reloaded — max_charge_voltage={settings['dvcc_max_charge_voltage']}V "
                          f"max_charge_current={settings['dvcc_max_charge_current']}A")
         except Exception as _e:
@@ -4911,6 +5276,90 @@ def main(stdscr):
             web_data['balancing'] = balancing_active
             web_data['last_update'] = time.time()
             web_data['system_status'] = 'Alert' if alert_needed else 'Running'
+        # Feature 1+2: Temperature-derated and cold-limited charge current
+        _valid_temps = [t for t in calibrated_temps if t is not None]
+        _max_temp = max(_valid_temps) if _valid_temps else 25.0
+        _min_temp = min(_valid_temps) if _valid_temps else 25.0
+        _base_current = settings.get('dvcc_max_charge_current', 200.0)
+        _eff_current = _base_current
+        _derate_start = settings.get('temp_derate_start', 38.0)
+        _derate_end = settings.get('temp_derate_end', 45.0)
+        if _max_temp >= _derate_end:
+            _eff_current = 0.0
+        elif _max_temp > _derate_start and _derate_end > _derate_start:
+            _hot_ratio = (_max_temp - _derate_start) / (_derate_end - _derate_start)
+            _eff_current = _base_current * (1.0 - _hot_ratio)
+        _cold_cutoff = settings.get('cold_charge_cutoff', 5.0)
+        _cold_min = settings.get('cold_charge_min', 0.0)
+        if _min_temp <= _cold_min:
+            _eff_current = 0.0
+        elif _min_temp < _cold_cutoff and _cold_cutoff > _cold_min:
+            _cold_ratio = (_cold_cutoff - _min_temp) / (_cold_cutoff - _cold_min)
+            _eff_current = min(_eff_current, _base_current * (1.0 - _cold_ratio))
+        settings['_effective_charge_current'] = round(max(0.0, _eff_current), 1)
+
+        # Feature 3: Per-bank high-voltage cutoff
+        _hvt = settings.get('HighVoltageThresholdPerBattery', 21.0)
+        if battery_voltages and max(battery_voltages) >= _hvt:
+            settings['_hv_clamp'] = True
+            settings['_hv_clamped_cvl'] = round(sum(v for v in battery_voltages if v > 0), 2)
+        else:
+            settings['_hv_clamp'] = False
+            settings['_hv_clamped_cvl'] = 0.0
+
+        # Feature 6: Charge state detection
+        _pack_v = sum(v for v in battery_voltages if v > 0) if battery_voltages else 0.0
+        _cv_target = settings.get('dvcc_max_charge_voltage', 61.0)
+        _v_history = settings.get('_v_history', [])
+        _v_history.append(_pack_v)
+        if len(_v_history) > 5: _v_history = _v_history[-5:]
+        settings['_v_history'] = _v_history
+        _v_trend = (_v_history[-1] - _v_history[0]) if len(_v_history) >= 2 else 0.0
+        if _pack_v <= 0:
+            _charge_state = 'Idle'
+        elif _v_trend < -0.1:
+            _charge_state = 'Discharging'
+        elif _v_trend > 0.1 and _pack_v < _cv_target - 2.0:
+            _charge_state = 'Bulk'
+        elif _pack_v >= _cv_target - 0.5 and abs(_v_trend) <= 0.15:
+            _charge_state = 'Float'
+        elif _pack_v >= _cv_target - 2.0:
+            _charge_state = 'Absorption'
+        else:
+            _charge_state = 'Idle'
+        settings['_charge_state'] = _charge_state
+        with data_lock:
+            web_data['charge_state'] = _charge_state
+            web_data['effective_charge_current'] = settings['_effective_charge_current']
+            web_data['hv_clamp'] = settings.get('_hv_clamp', False)
+            web_data['hv_clamped_cvl'] = settings.get('_hv_clamped_cvl', 0.0)
+
+        # Auto cable drop compensation: measure cerbo_cvl minus actual battery voltage.
+        # CRITICAL: Only learn when voltage is STABLE (|v_trend| < 0.15) which indicates
+        # the charger is in CV mode. In CC mode the charger output < cerbo_cvl, so
+        # cerbo_cvl - bms_total is NOT the cable drop — it includes the battery deficit.
+        # Not persisted to INI: relearns each session from zero.
+        if not balancing_active and battery_voltages and not alert_needed:
+            _bms_total = sum(v for v in battery_voltages if v > 0)
+            _target = settings['dvcc_max_charge_voltage']
+            _old_drop = settings.get('cable_drop_compensation', 0.0)
+            _cerbo_cvl = min(63.0, _target + _old_drop)
+            _measured = _cerbo_cvl - _bms_total
+            # Safety: if battery has exceeded target by >0.3V, compensation is too high — decay it
+            if _bms_total > _target + 0.3:
+                _new_drop = round(0.9 * _old_drop, 3)  # Decay 10% per cycle
+                settings['cable_drop_compensation'] = max(0.0, _new_drop)
+                logging.info(f'Cable drop decayed (battery above target): {_old_drop:.3f}V -> {_new_drop:.3f}V')
+            # Only learn when charger is in CV mode: battery within 2V of target AND voltage stable
+            elif (0.0 <= _measured <= 5.0
+                  and _bms_total >= _target - 2.0
+                  and abs(_v_trend) < 0.15
+                  and (_target + _old_drop) < 62.95):
+                _new_drop = round(0.1 * _measured + 0.9 * _old_drop, 3)
+                _new_drop = max(0.0, min(5.0, _new_drop))
+                if abs(_new_drop - _old_drop) >= 0.005:
+                    settings['cable_drop_compensation'] = _new_drop
+                    logging.debug(f'Cable drop updated: {_old_drop:.3f}V -> {_new_drop:.3f}V (bms={_bms_total:.2f}V cerbo={_cerbo_cvl:.2f}V trend={_v_trend:.3f}V)')
         # Draw TUI.
         draw_tui(
             stdscr, battery_voltages, calibrated_temps, raw_temps,

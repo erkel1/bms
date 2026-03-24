@@ -1,145 +1,151 @@
-  Battery Balancer Script README body { font-family: Arial, sans-serif; line-height: 1.6; max-width: 800px; margin: 0 auto; padding: 20px; } h1, h2, h3 { color: #333; } code { background-color: #f4f4f4; padding: 2px 4px; border-radius: 4px; font-family: 'Courier New', Courier, monospace; } pre { background-color: #f4f4f4; padding: 10px; border-radius: 4px; overflow: auto; } ul { list-style-type: square; }
+# Battery Management System (BMS)
 
-Battery Balancer Script
-=======================
+A Python-based Battery Management System for monitoring and managing large lithium battery packs on Raspberry Pi, with Victron Cerbo GX integration via Modbus TCP.
 
-A comprehensive Python-based Battery Management System (BMS) designed for monitoring and balancing multiple lithium battery cells using Raspberry Pi. The system provides real-time monitoring via both terminal-based user interface (TUI) and web dashboard, with advanced temperature and voltage management capabilities.
+## Hardware
 
-Features
---------
+- **Raspberry Pi 2B** — runs `bms.py` at `192.168.15.137`
+- **ADS1115 ADC** — per-bank voltage measurement
+- **TCA9548A I2C multiplexer** — multiple I2C channels
+- **Lantronix EDS4100** — RS485-to-TCP gateway for NTC temperature sensors (Modbus RTU slaves)
+- **M5Stack 4Relay** — relay control for balancing DC-DC converter
+- **Victron Cerbo GX** — energy management system, reads BMS limits via Modbus TCP
 
-*   **Real-time Voltage Monitoring**: Monitors the voltage of each battery bank in real-time using ADS1115 ADC.
-*   **Temperature Monitoring**: Monitors temperatures from multiple NTC sensors via Modbus TCP.
-*   **Automatic Balancing**: Intelligently balances charge between battery banks when voltage disparities exceed thresholds.
-*   **Dual User Interfaces**: Terminal-based TUI with ASCII art and web dashboard with interactive charts.
-*   **Alarm System**: Alerts via email and hardware relay when cells reach critical voltage/temperature levels.
-*   **Hardware Watchdog**: Automatically restarts the system if it becomes unresponsive.
-*   **Time-Series Logging**: Persistent storage of voltage and temperature history using RRDTool.
-*   **Comprehensive Modbus Tool**: Unified utility for Modbus device testing, configuration, and debugging.
+## Architecture
 
-Hardware Requirements
----------------------
+The pack is 3 banks wired in series. Each bank has 8 temperature sensors. A Cerbo GX connects over Modbus TCP to read charge/discharge limits and publish them to the MPPT solar charger via DVCC.
 
-*   Raspberry Pi (with Python 3 installed)
-*   ADS1115 ADC for voltage measurement
-*   M5Stack 4Relay module for relay control
-*   DC-DC converter for balancing
-*   I2C multiplexer (PaHUB2)
-*   Buzzer or LED for physical alarm indication
-
-Software Requirements
----------------------
-
-*   Python 3
-*   Libraries:
-    *   `smbus`
-    *   `RPi.GPIO`
-    *   `smtplib`
-    *   `curses`
-    *   `configparser`
-    *   `logging`
-    *   `threading`
-    *   `os`, `signal`, `sys`
-
-Installation
-------------
-
-1.  **Clone the Repository**:
-    
-        git clone [your-repository-url]
-        cd battery-balancer
-    
-2.  **Install Dependencies**:
-    
-        sudo apt-get update
-        sudo apt-get install -y python3-smbus python3-rpi.gpio python3-curses python3-configparser
-    
-3.  **Setup Configuration**:
-    *   Edit `config.ini` with the correct hardware settings, email configurations, and operational parameters.
-4.  **Run the Script**:
-    
-        python3 battery_balancer.py
-    
-
-Configuration
--------------
-
-*   **config.ini**: This file contains all necessary configuration settings:
-    *   `General`: Contains operational thresholds and timing.
-    *   `I2C`: Addresses for I2C devices.
-    *   `GPIO`: GPIO pin numbers for relay control.
-    *   `Email`: SMTP settings for email alerts.
-    *   `ADS1115`: Configuration for the ADC.
-
-Usage
------
-
-*   **Monitor**: The script will run, showing a TUI where you can monitor battery voltages.
-*   **Balancing**: If a voltage imbalance is detected, the script will initiate balancing automatically.
-
-Modbus Tool
------------
-
-The project includes a comprehensive Modbus tool at `modbus/modbus_tool.py` that consolidates all Modbus-related functionality:
-
-**Interactive Mode:**
-```bash
-python modbus/modbus_tool.py --interactive
+```
+[Solar MPPT] <-- DVCC <-- [Cerbo GX] <-- Modbus TCP/502 <-- [Raspberry Pi BMS]
+                                                                      |
+                                                             [Battery Pack 3S]
+                                                             [NTC Sensors x24]
 ```
 
-**Command Line Mode:**
+## Running
+
 ```bash
-# Test connectivity
-python modbus/modbus_tool.py --ip 192.168.15.245 --port 10001
-
-# Read registers
-python modbus/modbus_tool.py --ip 192.168.15.245 --slave 1 --func 3 --start 0 --count 24
-
-# Read device settings
-python modbus/modbus_tool.py --interactive
-# Then select option 5 from the menu
+cd /projects/battery_balancer
+python3 bms.py
 ```
 
-**Features:**
-*   **Slave Scanning**: Automatically detect active Modbus slaves (0-247)
-*   **Register Reading**: Read holding/input registers with full CRC verification
-*   **Register Writing**: Write single registers (e.g., change slave ID)
-*   **Device Settings**: Read common NTC sensor configuration (baud rate, parity, etc.)
-*   **Raw Commands**: Send custom Modbus commands for advanced debugging
-*   **Debug Mode**: Detailed output for troubleshooting communication issues
-*   **CRC Calculator**: Verify Modbus CRC checksums
+The BMS runs two servers:
+- **Web dashboard**: `http://192.168.15.137:8080` — fully self-hosted, no internet required
+- **Modbus TCP server**: port 502, unit ID 225
 
-Troubleshooting
----------------
+## Web Dashboard
 
-*   **Check Logs**: All operations are logged in `battery_monitor.log`. Check this for any errors or issues.
-*   **Hardware Check**: Ensure all connections are secure and hardware is functioning.
-*   **Configuration**: Verify settings in `battery_monitor.ini` are correct for your setup.
-*   **Modbus Testing**: Use the interactive modbus tool to test device connectivity and configuration.
-*   **Network Issues**: Use the modbus tool's connectivity test to verify network communication.
+All controls are available via browser. No CDN dependencies — all assets served from the Pi.
 
-Safety Notes
-------------
+### Charge Voltage (`/api/charge_voltage`)
+Set the target voltage at the battery terminals. The BMS automatically compensates for cable voltage drop between the MPPT charger and battery.
 
-*   **Do Not Overcharge**: Ensure your `ALARM_VOLTAGE_THRESHOLD` is set appropriately to avoid overcharging cells.
-*   **Physical Inspection**: Regularly inspect physical connections and battery health.
+| Field | Description |
+|-------|-------------|
+| `charge_voltage` | Target voltage at battery terminals (V), max 63V |
+| `cable_drop_compensation` | Auto-learned cable resistance drop (V), read-only |
+| `cerbo_voltage` | Actual setpoint sent to Cerbo/MPPT (= target + compensation) |
 
-License
--------
+**Cable drop compensation** only learns when the charger is in CV mode (voltage stable, `|trend| < 0.15V/5-cycles`). It automatically decays if the battery exceeds the target. Not persisted across restarts — relearned each session.
 
-\[Your License Here\] - e.g., MIT License, GPL, etc.
+### DVCC Settings (`/api/dvcc_settings`)
 
-Acknowledgements
-----------------
+| Setting | Description | Default |
+|---------|-------------|---------|
+| `max_charge_current` | Base charge current limit (A) | 200 |
+| `max_discharge_current` | Discharge current limit (A) | 200 |
+| `min_discharge_voltage` | Minimum pack discharge voltage (V) | 49.5 |
+| `discharge_cable_drop` | Manual cable drop offset for discharge (V) | 0.0 |
+| `temp_derate_start` | Temperature where charge current starts reducing (°C) | 35 |
+| `temp_derate_end` | Temperature where charge current reaches zero (°C) | 45 |
+| `cold_charge_cutoff` | Temperature where cold derating starts (°C) | 5 |
+| `cold_charge_min` | Temperature below which charging stops entirely (°C) | 0 |
 
-*   Special thanks to \[Your Name or Team\] for the development of this script.
-*   Thanks to the open-source community for the libraries and tools used in this project.
+`cold_charge_cutoff` must be greater than `cold_charge_min`.
 
-Contact
--------
+### Modbus Registers (Victron DVCC standard)
 
-For any issues or suggestions, please contact \[Your Contact Information\].
+| Register | Value | Notes |
+|----------|-------|-------|
+| 305 | Max charge voltage × 10 | Cerbo setpoint = target + cable drop compensation; capped at 63V; overridden by HV clamp |
+| 306 | Min discharge voltage × 10 | = `min_discharge_voltage - discharge_cable_drop` |
+| 307 | Max charge current × 10 | Temperature-derated effective current |
+| 308 | Max discharge current × 10 | |
+| 318 | Min cell temperature × 10 (deci°C) | |
+| 319 | Max cell temperature × 10 (deci°C) | |
+| 320–322 | Per-bank median temperatures × 10 | |
 
-* * *
+## Configuration (`battery_monitor.ini`)
 
-Feel free to contribute to this project by submitting pull requests or raising issues on the repository.
+### `[DVCC]` section
+
+```ini
+[DVCC]
+max_charge_voltage = 60.3        # Target voltage at battery terminals (V)
+max_charge_current = 200.0       # Base charge current limit (A)
+max_discharge_current = 200.0    # Discharge current limit (A)
+min_discharge_voltage = 49.5     # Low voltage cutoff (V)
+discharge_cable_drop = 0.0       # Manual cable drop offset for discharge (V)
+temp_derate_start = 35.0         # Hot derating start temperature (°C)
+temp_derate_end = 45.0           # Hot derating end temperature (°C)
+cold_charge_cutoff = 5.0         # Cold derating start temperature (°C)
+cold_charge_min = 0.0            # Cold hard-stop temperature (°C)
+```
+
+DVCC settings can be hot-reloaded without restart:
+```bash
+kill -HUP $(pgrep -f bms.py)
+```
+
+## Features
+
+### Temperature-Derated Charging
+Charge current is linearly reduced between `temp_derate_start` and `temp_derate_end`. Above `temp_derate_end`, charging stops. Uses the **maximum** temperature across all sensors.
+
+### Cold Charge Limiting
+Charge current is linearly reduced between `cold_charge_min` and `cold_charge_cutoff`. Below `cold_charge_min`, charging stops. Uses the **minimum** temperature across all sensors.
+
+### Per-Bank High-Voltage Cutoff
+If any bank reaches `HighVoltageThresholdPerBattery`, the charge voltage limit sent to the Cerbo is clamped to the current pack voltage (stopping further charge). Releases automatically when all banks drop below the threshold.
+
+### Auto Cable Drop Compensation
+The BMS measures the gap between the commanded Cerbo CVL and the actual battery terminal voltage. This gap equals the cable resistance voltage drop when the charger is in CV mode. An EMA (α=0.1) tracks this and adjusts the Cerbo setpoint upward to compensate.
+
+**Limits:**
+- Maximum compensatable drop: `63V − target` (e.g. 2.7V for a 60.3V target)
+- Bootstrap limit from zero: ~2V (battery must reach within 2V of target for learning to start)
+- Does not learn in CC mode (gated by voltage stability check)
+
+### Discharge Voltage Cable Drop
+A fixed manual offset (`discharge_cable_drop`) is subtracted from the minimum discharge voltage sent to the Cerbo. Use this to compensate for cable drop on the discharge path.
+
+### Charge State Indicator
+Real-time state displayed in the web dashboard:
+
+| State | Condition |
+|-------|-----------|
+| Bulk | Voltage rising >0.1V/5-cycles AND more than 2V below target |
+| Absorption | Within 2V of target |
+| Float | Within 0.5V of target AND voltage stable |
+| Discharging | Voltage dropping >0.1V/5-cycles |
+| Idle | All other cases |
+
+### Web Server Watchdog
+A background thread monitors the Flask server thread every 30 seconds and restarts it automatically if it dies.
+
+### Hardware Watchdog
+If the main polling loop hangs for >60 seconds, the hardware watchdog (`/dev/watchdog`) triggers a system reboot.
+
+## Logs
+
+```bash
+tail -f /projects/battery_balancer/battery_monitor.log
+```
+
+Rotated: 10MB per file, 10 files max (~100MB total).
+
+## Known Issues / Limitations
+
+- **Cerbo GX SSH**: The `dbus-bms-battery.py` driver on the Cerbo may need a manual restart after initial setup or Modbus address changes.
+- **Cable drop maximum**: For >2.7V drop (60.3V target), consider lower target voltage or thicker cable.
+- **RRD history**: Requires `rrdtool` installed for chart history.

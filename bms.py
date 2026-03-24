@@ -4359,11 +4359,21 @@ def start_web_server(settings):
     // ── Status update ──────────────────────────────────────────────
     function updateStatus() {{
         fetch('/api/status').then(r => r.json()).then(data => {{
-            const ok = data.system_status !== 'Alert';
+            const st = data.system_status || '';
             const badge = document.getElementById('sbadge');
-            badge.className = 'badge ' + (ok ? 'ok' : 'bad');
+            let badgeCls, badgeText;
+            if (st === 'Running') {{
+                badgeCls = 'ok'; badgeText = '✓ Running';
+            }} else if (st === 'Alert') {{
+                badgeCls = 'bad'; badgeText = '⚠ Alert';
+            }} else if (st.startsWith('Startup') || st === 'Initializing') {{
+                badgeCls = 'idle'; badgeText = '⟳ ' + st;
+            }} else {{
+                badgeCls = 'idle'; badgeText = st || 'Connecting…';
+            }}
+            badge.className = 'badge ' + badgeCls;
             document.getElementById('sbdot').className = 'dot pulse';
-            document.getElementById('stext').textContent = ok ? '✓ Running' : '⚠ Alert';
+            document.getElementById('stext').textContent = badgeText;
             document.getElementById('lupd').textContent = 'Updated ' + new Date(data.last_update * 1000).toLocaleTimeString();
 
             // Total voltage
@@ -4410,8 +4420,6 @@ def start_web_server(settings):
                 const mcCs = document.getElementById('mc-cs');
                 if (mcCs) {{ mcCs.style.display=''; const _csCls={{'Float':'ok','Bulk':'ok','Absorption':'warn','Discharging':'warn'}}; mcCs.className='mc '+(_csCls[csState]||'ok')+'-line'; }}
                 const effV = data.effective_charge_current !== undefined ? parseFloat(data.effective_charge_current).toFixed(1) : '—';
-                const effEl = document.getElementById('cs-eff');
-                if (effEl) effEl.textContent = effV;
                 const sub = document.getElementById('cs-sub');
                 if (sub) sub.innerHTML = 'Effective: <span id="cs-eff">' + effV + '</span>A' + (data.hv_clamp ? ' <span style="color:var(--bad);font-size:.7rem">HV CLAMP</span>' : '');
             }}
@@ -4899,7 +4907,8 @@ def start_web_server(settings):
                 if val < 0 or val > 1000:
                     return jsonify({'success': False, 'message': 'max_charge_current must be 0-1000A'}), 400
                 settings['dvcc_max_charge_current'] = val
-                settings['_effective_charge_current'] = min(val, settings.get('_effective_charge_current', val))
+                # Do not touch _effective_charge_current here; main loop recalculates it
+                # correctly with temp derating on the next poll cycle (within 2 seconds).
                 changed.append(('max_charge_current', str(val)))
             if 'max_discharge_current' in data:
                 val = float(data['max_discharge_current'])
@@ -5326,7 +5335,9 @@ def main(stdscr):
         _hvt = settings.get('HighVoltageThresholdPerBattery', 21.0)
         if battery_voltages and max(battery_voltages) >= _hvt:
             settings['_hv_clamp'] = True
-            settings['_hv_clamped_cvl'] = round(sum(v for v in battery_voltages if v > 0), 2)
+            # Set CVL to normal target (no cable drop) so charger sees CVL < current pack → stops charging.
+            # Previously used sum(battery_voltages) which was at/above normal CVL and let charger maintain elevated voltage.
+            settings['_hv_clamped_cvl'] = settings.get('dvcc_max_charge_voltage', 61.0)
         else:
             settings['_hv_clamp'] = False
             settings['_hv_clamped_cvl'] = 0.0

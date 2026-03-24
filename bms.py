@@ -4213,7 +4213,7 @@ def start_web_server(settings):
         <div class="mc" id="mc-bm"><div class="ml">Balancing</div><div class="mv ok" id="bm">—</div><div class="ms" id="bms2">—</div></div>
         <div class="mc ok-line" id="mc-ac"><div class="ml">Active Alerts</div><div class="mv ok" id="ac">—</div><div class="ms">System health</div></div>
         <div class="mc ok-line" id="mc-at"><div class="ml">Avg Temperature</div><div class="mv ok" id="at">—</div><div class="ms">All sensors</div></div>
-        <div class="mc ok-line" id="mc-cv"><div class="ml">Charge Voltage</div><div class="mv ok" id="cv-display">—</div><div class="ms" style="display:flex;flex-direction:column;gap:5px"><div style="display:flex;align-items:center;gap:4px"><span style="font-size:.7rem;color:var(--fg2);min-width:44px">Target</span><input type="number" id="cv-input" min="0.1" max="63" step="0.1" style="width:58px;background:var(--surface2);color:var(--fg);border:1px solid var(--border);border-radius:4px;padding:2px 4px;font-size:.75rem" title="Desired voltage at battery terminals"><span style="font-size:.7rem;color:var(--fg3)">V</span><button onclick="setChargeVoltage()" style="padding:2px 7px;font-size:.72rem;background:var(--acc);color:#fff;border:none;border-radius:4px;cursor:pointer">Set</button></div><div style="font-size:.7rem;color:var(--fg2)">Drop: <span id="cv-drop-display" style="color:var(--fg)">—</span> <span style="color:var(--fg3)">(auto)</span> &nbsp;→&nbsp; <span id="cv-cerbo-display" style="color:var(--warn)">—</span> to Cerbo <span id="cv-cap-warn" style="display:none;color:var(--bad);font-size:.7rem" title="Target voltage is unreachable - increase target or reduce cable resistance">⚠ CAP</span> <span id="cv-cap-warn" style="display:none;color:var(--bad);font-size:.7rem" title="Target voltage is unreachable - increase target or reduce cable resistance">⚠ CAP</span></div></div></div>
+        <div class="mc ok-line" id="mc-cv"><div class="ml">Charge Voltage</div><div class="mv ok" id="cv-display">—</div><div class="ms" style="display:flex;flex-direction:column;gap:5px"><div style="display:flex;align-items:center;gap:4px"><span style="font-size:.7rem;color:var(--fg2);min-width:44px">Target</span><input type="number" id="cv-input" min="0.1" max="63" step="0.1" style="width:58px;background:var(--surface2);color:var(--fg);border:1px solid var(--border);border-radius:4px;padding:2px 4px;font-size:.75rem" title="Desired voltage at battery terminals"><span style="font-size:.7rem;color:var(--fg3)">V</span><button onclick="setChargeVoltage()" style="padding:2px 7px;font-size:.72rem;background:var(--acc);color:#fff;border:none;border-radius:4px;cursor:pointer">Set</button></div><div style="font-size:.7rem;color:var(--fg2)">Drop: <span id="cv-drop-display" style="color:var(--fg)">—</span> <span style="color:var(--fg3)">(auto)</span> &nbsp;→&nbsp; <span id="cv-cerbo-display" style="color:var(--warn)">—</span> to Cerbo <span id="cv-cap-warn" style="display:none;color:var(--bad);font-size:.7rem" title="Target voltage is unreachable - increase target or reduce cable resistance">⚠ CAP</span></div></div></div>
     </div>
     <!-- Charge State + DVCC Settings -->
     <div id="mc-cs" class="mc ok-line" style="display:none"><div class="ml">Charge State</div><div class="mv ok" id="cs-display">—</div><div class="ms" id="cs-sub">Effective: <span id="cs-eff">—</span>A</div></div>
@@ -4481,16 +4481,6 @@ def start_web_server(settings):
                 const isAtCap = data.cerbo_voltage !== undefined && data.cerbo_voltage >= 62.95;
                 capWarn.style.display = isAtCap ? '' : 'none';
             }}
-            // Auto-refresh cable drop display
-            if (data.cable_drop_compensation !== undefined && data.cerbo_voltage !== undefined) {{
-                updateCvDisplay(parseFloat(data.charge_voltage || 60.3), parseFloat(data.cable_drop_compensation), parseFloat(data.cerbo_voltage));
-            }}
-            // Show cap warning if target is unreachable
-            const capWarn = document.getElementById('cv-cap-warn');
-            if (capWarn) {{
-                const isAtCap = data.cerbo_voltage !== undefined && data.cerbo_voltage >= 62.95;
-                capWarn.style.display = isAtCap ? '' : 'none';
-            }}
 
         }}).catch(() => {{
             document.getElementById('sbadge').className = 'badge bad';
@@ -4715,9 +4705,6 @@ def start_web_server(settings):
                     'cable_drop_compensation': settings.get('cable_drop_compensation', 0.0),
                     'cerbo_voltage': round(min(63.0, settings.get('dvcc_max_charge_voltage', 60.3) + settings.get('cable_drop_compensation', 0.0)), 2),
                     'charge_voltage': settings.get('dvcc_max_charge_voltage', 60.3),
-                    'cable_drop_compensation': settings.get('cable_drop_compensation', 0.0),
-                    'cerbo_voltage': round(min(63.0, settings.get('dvcc_max_charge_voltage', 60.3) + settings.get('cable_drop_compensation', 0.0)), 2),
-                    'charge_voltage': settings.get('dvcc_max_charge_voltage', 60.3),
                     'web_server_healthy': web_data.get('_web_server_healthy', True),
                 }
             return jsonify(response)
@@ -4865,6 +4852,11 @@ def start_web_server(settings):
         try:
             data = request.get_json(force=True)
             ini_path = os.path.join(settings.get('data_dir', '/projects/battery_balancer'), 'battery_monitor.ini')
+            # Pre-validate cold charge cross-constraint before mutating any settings
+            _cc_proposed = float(data['cold_charge_cutoff']) if 'cold_charge_cutoff' in data else settings.get('cold_charge_cutoff', 5.0)
+            _cm_proposed = float(data['cold_charge_min']) if 'cold_charge_min' in data else settings.get('cold_charge_min', 0.0)
+            if _cc_proposed <= _cm_proposed:
+                return jsonify({'success': False, 'message': 'cold_charge_cutoff must be greater than cold_charge_min'}), 400
             changed = []
             if 'max_charge_current' in data:
                 val = float(data['max_charge_current'])
@@ -4907,11 +4899,7 @@ def start_web_server(settings):
                 val = float(data['cold_charge_min'])
                 settings['cold_charge_min'] = val
                 changed.append(('cold_charge_min', str(val)))
-            # Validate cold charge ordering: cutoff must be > min
-            _cc = settings.get('cold_charge_cutoff', 5.0)
-            _cm = settings.get('cold_charge_min', 0.0)
-            if _cc <= _cm:
-                return jsonify({'success': False, 'message': 'cold_charge_cutoff must be greater than cold_charge_min'}), 400
+            # cold_charge cross-validation already done above before any mutation
             if changed:
                 try:
                     _cfg = configparser.ConfigParser(comment_prefixes=(';', '#'))
@@ -5339,7 +5327,9 @@ def main(stdscr):
         # the charger is in CV mode. In CC mode the charger output < cerbo_cvl, so
         # cerbo_cvl - bms_total is NOT the cable drop — it includes the battery deficit.
         # Not persisted to INI: relearns each session from zero.
-        if not balancing_active and battery_voltages and not alert_needed:
+        # Don't learn during active balancing; voltage alert (not balancer_failed) would skew readings
+        _volt_alert = any(v is not None and (v <= 0 or v > settings.get('HighVoltageThresholdPerBattery', 21.5) or v < settings.get('LowVoltageThresholdPerBattery', 16.5)) for v in battery_voltages)
+        if not balancing_active and battery_voltages and not _volt_alert:
             _bms_total = sum(v for v in battery_voltages if v > 0)
             _target = settings['dvcc_max_charge_voltage']
             _old_drop = settings.get('cable_drop_compensation', 0.0)

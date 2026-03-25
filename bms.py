@@ -623,6 +623,46 @@ def modbus_crc(data):
     # Convert the 16-bit CRC to 2 bytes, little-endian (low byte first).
     return crc.to_bytes(2, 'little')
 
+_cerbo_dc_cache = {'v': None, 'ts': 0.0}   # module-level cache for Cerbo DC voltage
+
+def read_cerbo_dc_voltage(cerbo_ip, cache_ttl=5.0):
+    """Read Cerbo GX VE.Bus DC bus voltage via raw Modbus TCP (unit 100, reg 840, scale 0.1V).
+
+    This is the MultiPlus/Quattro's own measurement of its DC terminals — independent of
+    any voltage we report back to the Cerbo.  Used to calculate the true cable-drop between
+    the charger and the battery terminals measured by the BMS.
+
+    Returns voltage in volts, or None if the Cerbo is unreachable / returns an error.
+    Results are cached for cache_ttl seconds to avoid hammering the Cerbo every poll cycle.
+    """
+    global _cerbo_dc_cache
+    now = time.time()
+    if now - _cerbo_dc_cache['ts'] < cache_ttl and _cerbo_dc_cache['v'] is not None:
+        return _cerbo_dc_cache['v']
+    try:
+        req = struct.pack(">HHHBBHH", 1, 0, 6, 227, 3, 26, 1)
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        s.settimeout(0.5)
+        s.connect((cerbo_ip, 502))
+        s.sendall(req)
+        resp = b""
+        deadline = time.time() + 0.5
+        while len(resp) < 11 and time.time() < deadline:
+            chunk = s.recv(64)
+            if not chunk:
+                break
+            resp += chunk
+        s.close()
+        if len(resp) >= 11 and not (resp[7] & 0x80):
+            volts = struct.unpack(">H", resp[9:11])[0] * 0.01
+            _cerbo_dc_cache['v'] = volts
+            _cerbo_dc_cache['ts'] = now
+            return volts
+    except Exception:
+        pass
+    return None
+
+
 def test_modbus_connectivity(ip, port):
     """
     Test network connectivity to the Modbus device.
@@ -3491,7 +3531,7 @@ def startup_self_test(settings, stdscr, data_dir):
         # Set alerts (warnings from skipped tests are not in 'alerts' list)
         startup_alerts = alerts
         # Only count actual FAILED tests as failures - skipped tests are expected when voltage is low.
-        actual_failures = [a for a in alerts if not a.startswith('Skipping balance test')]
+        actual_failures = alerts  # fix: low-voltage skips go to event_log only; keep all alerts
         # If actual failures exist, handle failure. If only skips, it's still a success.
         if actual_failures:
             startup_failed = True
@@ -3624,6 +3664,7 @@ def update_modbus_registers(settings):
         alerts = web_data["alerts"]
         balancing = web_data["balancing"]
         system_status = web_data["system_status"]
+        data_valid = web_data.get("data_valid", False)
     
     # Calculate values
     valid_temps = [t for t in temperatures if t is not None]
@@ -3633,7 +3674,7 @@ def update_modbus_registers(settings):
     max_voltage = max(voltages) if voltages else 0.0
     
     # Skip update if no real data available yet (boot initialisation)
-    if not voltages or not web_data.get('data_valid'):
+    if not voltages or not data_valid:
         return
     
     # Build register values using Victron addresses
@@ -4009,8 +4050,59 @@ def start_modbus_server(settings):
     server_thread.start()
     logging.info(f"Modbus TCP server thread started on port {settings['port']}")
 
+    # Store thread refs so the watchdog can monitor and restart them
+    settings['_modbus_server_thread']  = server_thread
+    settings['_modbus_updater_thread'] = updater_thread
+    settings['_modbus_context']        = modbus_datastore
+
+    # Modbus server watchdog -- mirrors the Flask web watchdog.
+    # If the server thread dies both threads are restarted (10 s delay
+    # for OS port release). If only the updater dies it restarts alone.
+    def _modbus_watchdog():
+        import time as _mwt
+        _mwt.sleep(60)          # grace period on startup
+        while True:
+            try:
+                _srv = settings.get('_modbus_server_thread')
+                _upd = settings.get('_modbus_updater_thread')
+                _ctx = settings.get('_modbus_context')
+                if _srv is not None and not _srv.is_alive():
+                    logging.warning('Modbus watchdog: server thread died -- '
+                                    'waiting 10 s for OS port release, then restarting both threads')
+                    _mwt.sleep(10)
+                    global modbus_server_running
+                    modbus_server_running = True
+                    _new_upd = threading.Thread(
+                        target=modbus_updater_thread, args=(_ctx, settings), daemon=True)
+                    _new_upd.start()
+                    settings['_modbus_updater_thread'] = _new_upd
+                    _new_srv = threading.Thread(
+                        target=modbus_server_thread, args=(_ctx, settings), daemon=True)
+                    _new_srv.start()
+                    settings['_modbus_server_thread'] = _new_srv
+                    _mwt.sleep(5)
+                    if _new_srv.is_alive():
+                        logging.info('Modbus watchdog: server thread restarted successfully.')
+                    else:
+                        logging.error('Modbus watchdog: server thread restart FAILED.')
+                elif _upd is not None and not _upd.is_alive():
+                    logging.warning('Modbus watchdog: updater thread died -- restarting updater only')
+                    _new_upd = threading.Thread(
+                        target=modbus_updater_thread, args=(_ctx, settings), daemon=True)
+                    _new_upd.start()
+                    settings['_modbus_updater_thread'] = _new_upd
+                    logging.info('Modbus watchdog: updater thread restarted.')
+            except Exception as _e:
+                logging.error(f'Modbus watchdog error: {_e}')
+            _mwt.sleep(30)
+
+    _modbus_wd = threading.Thread(target=_modbus_watchdog, name='modbus-watchdog', daemon=True)
+    _modbus_wd.start()
+    logging.info('Modbus server watchdog started.')
+
     # Start mDNS service advertisement for Victron Cerbo GX discovery
     start_mdns_advertisement(settings['port'], settings.get('unit_id', 1))
+
 
 def start_web_server(settings):
     """
@@ -4747,7 +4839,9 @@ def start_web_server(settings):
                     'dvcc_min_discharge_voltage': settings.get('dvcc_min_discharge_voltage', 49.5),
                     'discharge_cable_drop': settings.get('discharge_cable_drop', 0.0),
                     'cable_drop_compensation': settings.get('cable_drop_compensation', 0.0),
-                    'cerbo_voltage': round(min(63.0, settings.get('dvcc_max_charge_voltage', 60.3) + settings.get('cable_drop_compensation', 0.0)), 2),
+                    # cerbo_voltage: actual CVL sent — respects HV clamp (no cable drop when clamped)
+                    'cerbo_voltage': round(min(63.0, web_data.get('hv_clamped_cvl', settings.get('dvcc_max_charge_voltage', 60.3)) if web_data.get('hv_clamp', False) else settings.get('dvcc_max_charge_voltage', 60.3) + settings.get('cable_drop_compensation', 0.0)), 2),
+                    'cerbo_dc_voltage': _cerbo_dc_cache.get('v'),  # Cerbo GX measured DC bus voltage (null if unavailable)
                     'charge_voltage': settings.get('dvcc_max_charge_voltage', 60.3),
                     'web_server_healthy': web_data.get('_web_server_healthy', True),
                 }
@@ -4899,6 +4993,10 @@ def start_web_server(settings):
             # Pre-validate temp derate cross-constraint
             _tds_proposed = float(data['temp_derate_start']) if 'temp_derate_start' in data else settings.get('temp_derate_start', 38.0)
             _tde_proposed = float(data['temp_derate_end']) if 'temp_derate_end' in data else settings.get('temp_derate_end', 45.0)
+            if not (0.0 <= _tds_proposed <= 60.0):
+                return jsonify({'success': False, 'message': 'temp_derate_start must be 0-60°C'}), 400
+            if not (0.0 <= _tde_proposed <= 60.0):
+                return jsonify({'success': False, 'message': 'temp_derate_end must be 0-60°C'}), 400
             if _tde_proposed <= _tds_proposed:
                 return jsonify({'success': False, 'message': 'temp_derate_end must be greater than temp_derate_start'}), 400
             # Pre-validate cold charge cross-constraint before mutating any settings
@@ -4969,6 +5067,7 @@ def start_web_server(settings):
                 'max_discharge_current': settings.get('dvcc_max_discharge_current', 200.0),
                 'min_discharge_voltage': settings.get('dvcc_min_discharge_voltage', 49.5),
                 'discharge_cable_drop': settings.get('discharge_cable_drop', 0.0),
+                'effective_charge_current': settings.get('_effective_charge_current', settings.get('dvcc_max_charge_current', 200.0)),
                 'temp_derate_start': settings.get('temp_derate_start', 38.0),
                 'temp_derate_end': settings.get('temp_derate_end', 45.0),
                 'cold_charge_cutoff': settings.get('cold_charge_cutoff', 5.0),
@@ -5265,8 +5364,15 @@ def main(stdscr):
         # Update RRD.
         timestamp = int(time.time())
         values = f"{timestamp}:{overall_median}:{':'.join(map(str, battery_voltages))}"
-        subprocess.call(['rrdtool', 'update', RRD_FILE, values])
-        logging.debug(f"RRD updated with: {values}")
+        # Only spawn rrdtool every 30 s -- RRD step is 60 s so more frequent
+        # updates just burn CPU and RAM on the Pi 2B for no extra benefit.
+        _rrd_now = int(time.time())
+        if _rrd_now - settings.get('_rrd_last_update', 0) >= 30:
+            subprocess.call(['rrdtool', 'update', RRD_FILE, values])
+            settings['_rrd_last_update'] = _rrd_now
+            logging.debug(f"RRD updated with: {values}")
+        else:
+            logging.debug(f"RRD update skipped ({_rrd_now - settings.get('_rrd_last_update', 0)}s since last write)")
         # Reset balancing_active if balancer_failed prevents us from processing it
         if balancer_failed and balancing_active:
             logging.warning("Resetting balancing_active flag - balancer_failed prevents balancing")
@@ -5375,34 +5481,66 @@ def main(stdscr):
             web_data['hv_clamp'] = settings.get('_hv_clamp', False)
             web_data['hv_clamped_cvl'] = settings.get('_hv_clamped_cvl', 0.0)
 
-        # Auto cable drop compensation: measure cerbo_cvl minus actual battery voltage.
-        # CRITICAL: Only learn when voltage is STABLE (|v_trend| < 0.15) which indicates
-        # the charger is in CV mode. In CC mode the charger output < cerbo_cvl, so
-        # cerbo_cvl - bms_total is NOT the cable drop — it includes the battery deficit.
+        # Auto cable drop compensation: read the Cerbo GX's own DC bus voltage (the MultiPlus
+        # terminals) and compare it to the BMS battery terminal voltage.  This gives the TRUE
+        # cable-drop without the positive-feedback problem of the old CVL-minus-BMS approach.
+        #
+        # Physical direction:
+        #   Charging  → Multi output > Battery terminal  → cerbo_dc > bms_total (drop > 0)
+        #   Discharging → Battery terminal > Multi input  → cerbo_dc < bms_total (skip)
+        #
+        # Max compensation capped at 1.0 V to prevent dangerous overvoltage.
         # Not persisted to INI: relearns each session from zero.
-        # Don't learn during active balancing; voltage alert (not balancer_failed) would skew readings
+        # Don't learn during active balancing or voltage alerts.
         _volt_alert = any(v is not None and (v <= 0 or v > settings.get('HighVoltageThresholdPerBattery', 21.5) or v < settings.get('LowVoltageThresholdPerBattery', 16.5)) for v in battery_voltages)
+        # Hard-clamp any previously accumulated over-compensation immediately
+        if settings.get('cable_drop_compensation', 0.0) > 1.0:
+            logging.warning(f"Cable drop clamped from {settings['cable_drop_compensation']:.3f}V to 1.0V hard cap")
+            settings['cable_drop_compensation'] = 1.0
         if not balancing_active and battery_voltages and not _volt_alert and not settings.get("_hv_clamp", False):
             _bms_total = sum(v for v in battery_voltages if v > 0)
             _target = settings['dvcc_max_charge_voltage']
             _old_drop = settings.get('cable_drop_compensation', 0.0)
-            _cerbo_cvl = min(63.0, _target + _old_drop)
-            _measured = _cerbo_cvl - _bms_total
-            # Safety: if battery has exceeded target by >0.3V, compensation is too high — decay it
+            _cerbo_dc_v = None  # fix: initialise before branching to prevent NameError in decay branch
+            # Decay immediately if battery already above target (compensation wound too high)
             if _bms_total > _target + 0.3:
-                _new_drop = round(0.9 * _old_drop, 3)  # Decay 10% per cycle
+                _new_drop = round(0.9 * _old_drop, 3)
                 settings['cable_drop_compensation'] = max(0.0, _new_drop)
                 logging.info(f'Cable drop decayed (battery above target): {_old_drop:.3f}V -> {_new_drop:.3f}V')
-            # Only learn when charger is in CV mode: battery within 2V of target AND voltage stable
-            elif (0.0 <= _measured <= 5.0
-                  and _bms_total >= _target - 2.0
-                  and abs(_v_trend) < 0.15
-                  and (_target + _old_drop) < 62.95):
-                _new_drop = round(0.1 * _measured + 0.9 * _old_drop, 3)
-                _new_drop = max(0.0, min(5.0, _new_drop))
-                if abs(_new_drop - _old_drop) >= 0.005:
-                    settings['cable_drop_compensation'] = _new_drop
-                    logging.debug(f'Cable drop updated: {_old_drop:.3f}V -> {_new_drop:.3f}V (bms={_bms_total:.2f}V cerbo={_cerbo_cvl:.2f}V trend={_v_trend:.3f}V)')
+            else:
+                # Read the Cerbo GX DC bus voltage (MultiPlus terminal, unit 100 reg 840, 0.1V)
+                _cerbo_dc_v = read_cerbo_dc_voltage(settings.get('cerbo_ip', '192.168.15.67'))
+                if _cerbo_dc_v is not None and _cerbo_dc_v > _bms_total:
+                    # Charging confirmed: Cerbo DC > BMS terminal
+                    # Only update in CV mode: battery within 2V of target AND voltage stable
+                    if _bms_total >= _target - 2.0 and abs(_v_trend) < 0.15:
+                        _measured = _cerbo_dc_v - _bms_total   # real physical cable drop
+                        _new_drop = round(0.1 * _measured + 0.9 * _old_drop, 3)
+                        _new_drop = max(0.0, min(1.0, _new_drop))  # hard cap at 1V
+                        if abs(_new_drop - _old_drop) >= 0.005:
+                            settings['cable_drop_compensation'] = _new_drop
+                            logging.debug(f'Cable drop updated: {_old_drop:.3f}V -> {_new_drop:.3f}V '
+                                          f'(cerbo_dc={_cerbo_dc_v:.2f}V bms={_bms_total:.2f}V trend={_v_trend:.3f}V)')
+                elif _cerbo_dc_v is None:
+                    logging.debug('Cable drop: Cerbo DC voltage unavailable, skipping update')
+        # -- Cerbo connectivity tracking (fix: outside HV-clamp guard) ----
+        # Runs every poll regardless of HV clamp or volt-alert state.
+        # read_cerbo_dc_voltage has a 5 s TTL cache so no extra network traffic.
+        if not balancing_active and battery_voltages:
+            _cerbo_track_v = read_cerbo_dc_voltage(settings.get('cerbo_ip', '192.168.15.67'))
+            if _cerbo_track_v is not None:
+                settings['_cerbo_last_seen'] = time.time()
+                all_alerts = [a for a in all_alerts if 'Cerbo GX unreachable' not in a]
+            else:
+                _cerbo_offline_s = time.time() - settings.get('_cerbo_last_seen', time.time())
+                if _cerbo_offline_s > 60:
+                    _cerbo_msg = f'Cerbo GX unreachable for {int(_cerbo_offline_s)}s -- CVL frozen'
+                    all_alerts = [_cerbo_msg if 'Cerbo GX unreachable' in a else a for a in all_alerts]
+                    if not any('Cerbo GX unreachable' in a for a in all_alerts):
+                        all_alerts.append(_cerbo_msg)
+                        logging.warning(_cerbo_msg)
+            with data_lock:
+                web_data['alerts'] = all_alerts
         # Draw TUI.
         draw_tui(
             stdscr, battery_voltages, calibrated_temps, raw_temps,

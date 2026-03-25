@@ -25,6 +25,6 @@ if [ "$(tty)" = "/dev/tty1" ]; then
     while true; do
         python3 bms.py
         echo "BMS exited, restarting in 5 seconds..."
-        sleep 5
+        sleep 2
     done
 fi

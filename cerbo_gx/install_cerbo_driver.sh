@@ -73,10 +73,10 @@ sshpass -p "${CERBO_PASS}" ssh -o StrictHostKeyChecking=no root@${CERBO_IP} "chm
 
 # Create service run script
 echo "Creating service scripts..."
-sshpass -p "${CERBO_PASS}" ssh -o StrictHostKeyChecking=no root@${CERBO_IP} "printf '#!/bin/sh\nexec 2>&1\nexec python3 /data/dbus-bms-battery/dbus-bms-battery.py\n' > /data/dbus-bms-battery/service/run && chmod +x /data/dbus-bms-battery/service/run"
+sshpass -p "${CERBO_PASS}" ssh -o StrictHostKeyChecking=no root@${CERBO_IP} "printf '#!/bin/sh\nexec 2>&1\nexport DBUS_SYSTEM_BUS_ADDRESS=unix:path=/var/run/dbus/system_bus_socket\nexec python3 /data/dbus-bms-battery/dbus-bms-battery.py\n' > /data/dbus-bms-battery/service/run && chmod +x /data/dbus-bms-battery/service/run"
 
 # Create log run script
-sshpass -p "${CERBO_PASS}" ssh -o StrictHostKeyChecking=no root@${CERBO_IP} "printf '#!/bin/sh\nexec svlogd -tt /var/log/dbus-bms-battery\n' > /data/dbus-bms-battery/service/log/run && chmod +x /data/dbus-bms-battery/service/log/run"
+sshpass -p "${CERBO_PASS}" ssh -o StrictHostKeyChecking=no root@${CERBO_IP} "printf '#!/bin/sh\nexec multilog t s25000 n4 /var/log/dbus-bms-battery\n' > /data/dbus-bms-battery/service/log/run && chmod +x /data/dbus-bms-battery/service/log/run"
 
 # Create rc.local for boot persistence
 echo "Setting up boot persistence..."

@@ -154,6 +154,8 @@ class BmsBatteryService:
         d['/Alarms/HighTemperature']  = 0
         d['/Alarms/Alarm']            = 0
         d['/Connected']               = 0
+        d['/Dc/0/Voltage']        = None   # clear stale voltage on hard disconnect
+        d['/Dc/0/Temperature']    = None
 
     # ── Poll ──────────────────────────────────────────────────────────────────
     def _poll(self):

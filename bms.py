@@ -626,7 +626,7 @@ def modbus_crc(data):
 _cerbo_dc_cache = {'v': None, 'ts': 0.0}   # module-level cache for Cerbo DC voltage
 
 def read_cerbo_dc_voltage(cerbo_ip, cache_ttl=5.0):
-    """Read Cerbo GX VE.Bus DC bus voltage via raw Modbus TCP (unit 100, reg 840, scale 0.1V).
+    """Read Cerbo GX VE.Bus DC bus voltage via raw Modbus TCP (unit 227, reg 26, scale 0.01V).
 
     This is the MultiPlus/Quattro's own measurement of its DC terminals — independent of
     any voltage we report back to the Cerbo.  Used to calculate the true cable-drop between
@@ -637,8 +637,8 @@ def read_cerbo_dc_voltage(cerbo_ip, cache_ttl=5.0):
     """
     global _cerbo_dc_cache
     now = time.time()
-    if now - _cerbo_dc_cache['ts'] < cache_ttl and _cerbo_dc_cache['v'] is not None:
-        return _cerbo_dc_cache['v']
+    if now - _cerbo_dc_cache['ts'] < cache_ttl:
+        return _cerbo_dc_cache['v']  # negative caching: return None within TTL if last attempt failed
     try:
         req = struct.pack(">HHHBBHH", 1, 0, 6, 227, 3, 26, 1)
         s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -655,11 +655,14 @@ def read_cerbo_dc_voltage(cerbo_ip, cache_ttl=5.0):
         s.close()
         if len(resp) >= 11 and not (resp[7] & 0x80):
             volts = struct.unpack(">H", resp[9:11])[0] * 0.01
-            _cerbo_dc_cache['v'] = volts
-            _cerbo_dc_cache['ts'] = now
-            return volts
+            if 20.0 <= volts <= 100.0:  # reject 0xFFFF "not available" and other nonsense values
+                _cerbo_dc_cache['v'] = volts
+                _cerbo_dc_cache['ts'] = now
+                return volts
     except Exception:
         pass
+    _cerbo_dc_cache['v'] = None  # negative cache: failed attempt, wait cache_ttl before retry
+    _cerbo_dc_cache['ts'] = now
     return None
 
 
@@ -3338,9 +3341,8 @@ def startup_self_test(settings, stdscr, data_dir):
                             temp_anomaly = True
                             break
                 if temp_anomaly:
-                    alert = f"Skipping balance test from Bank {source} to Bank {dest}: Temp anomalies."
-                    alerts.append(alert)
-                    event_log.append(f"{time.strftime('%Y-%m-%d %H:%M:%S')}: {alert}")
+                    warning = f"Skipping balance test from Bank {source} to Bank {dest}: Temp anomalies."
+                    event_log.append(f"{time.strftime('%Y-%m-%d %H:%M:%S')}: {warning}")
                     if len(event_log) > settings.get('EventLogSize', 20):
                         event_log.pop(0)
                     logging.warning(f"Skipping balance test from Bank {source} to Bank {dest}: Temperature anomalies detected.")
@@ -5231,6 +5233,7 @@ def main(stdscr):
     # Give Modbus slaves time to initialize before self-test
     logging.info("Waiting 10 seconds for Modbus slaves to initialize...")
     time.sleep(10)
+    settings['_cerbo_last_seen'] = time.time()  # start 60 s offline-timer from BMS boot
     # Self-test.
     startup_self_test(settings, stdscr, data_dir)
     # Signal handler.
@@ -5508,7 +5511,7 @@ def main(stdscr):
                 settings['cable_drop_compensation'] = max(0.0, _new_drop)
                 logging.info(f'Cable drop decayed (battery above target): {_old_drop:.3f}V -> {_new_drop:.3f}V')
             else:
-                # Read the Cerbo GX DC bus voltage (MultiPlus terminal, unit 100 reg 840, 0.1V)
+                # Read the Cerbo GX DC bus voltage (MultiPlus terminal, unit 227 reg 26, 0.01V)
                 _cerbo_dc_v = read_cerbo_dc_voltage(settings.get('cerbo_ip', '192.168.15.67'))
                 if _cerbo_dc_v is not None and _cerbo_dc_v > _bms_total:
                     # Charging confirmed: Cerbo DC > BMS terminal

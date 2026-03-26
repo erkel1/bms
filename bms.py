@@ -623,7 +623,7 @@ def modbus_crc(data):
     # Convert the 16-bit CRC to 2 bytes, little-endian (low byte first).
     return crc.to_bytes(2, 'little')
 
-_cerbo_dc_cache = {'v': None, 'ts': 0.0}   # module-level cache for Cerbo DC voltage
+_cerbo_dc_cache = {'v': None, 'ts': 0.0, 'reachable': False}   # module-level cache for Cerbo DC voltage
 
 def read_cerbo_dc_voltage(cerbo_ip, cache_ttl=5.0):
     """Read Cerbo GX VE.Bus DC bus voltage via raw Modbus TCP (unit 227, reg 26, scale 0.01V).
@@ -653,6 +653,7 @@ def read_cerbo_dc_voltage(cerbo_ip, cache_ttl=5.0):
                 break
             resp += chunk
         s.close()
+        _cerbo_dc_cache['reachable'] = True  # TCP connected: Cerbo is up even if voltage out of range
         if len(resp) >= 11 and not (resp[7] & 0x80):
             volts = struct.unpack(">H", resp[9:11])[0] * 0.01
             if 20.0 <= volts <= 100.0:  # reject 0xFFFF "not available" and other nonsense values
@@ -660,7 +661,7 @@ def read_cerbo_dc_voltage(cerbo_ip, cache_ttl=5.0):
                 _cerbo_dc_cache['ts'] = now
                 return volts
     except Exception:
-        pass
+        _cerbo_dc_cache['reachable'] = False  # TCP failed: Cerbo genuinely unreachable
     _cerbo_dc_cache['v'] = None  # negative cache: failed attempt, wait cache_ttl before retry
     _cerbo_dc_cache['ts'] = now
     return None
@@ -3533,7 +3534,7 @@ def startup_self_test(settings, stdscr, data_dir):
         # Set alerts (warnings from skipped tests are not in 'alerts' list)
         startup_alerts = alerts
         # Only count actual FAILED tests as failures - skipped tests are expected when voltage is low.
-        actual_failures = alerts  # fix: low-voltage skips go to event_log only; keep all alerts
+        actual_failures = [a for a in alerts if not a.startswith("Balance test ambiguous:")]  # ambiguous = not failed
         # If actual failures exist, handle failure. If only skips, it's still a success.
         if actual_failures:
             startup_failed = True
@@ -5526,12 +5527,14 @@ def main(stdscr):
                                           f'(cerbo_dc={_cerbo_dc_v:.2f}V bms={_bms_total:.2f}V trend={_v_trend:.3f}V)')
                 elif _cerbo_dc_v is None:
                     logging.debug('Cable drop: Cerbo DC voltage unavailable, skipping update')
-        # -- Cerbo connectivity tracking (fix: outside HV-clamp guard) ----
-        # Runs every poll regardless of HV clamp or volt-alert state.
-        # read_cerbo_dc_voltage has a 5 s TTL cache so no extra network traffic.
-        if not balancing_active and battery_voltages:
-            _cerbo_track_v = read_cerbo_dc_voltage(settings.get('cerbo_ip', '192.168.15.67'))
-            if _cerbo_track_v is not None:
+        # -- Cerbo connectivity tracking ------------------------------------------------
+        # Runs every poll (including during balancing) so the Cerbo-unreachable alert
+        # is never dropped from web_data mid-balance.  The 5 s TTL cache means no
+        # extra network traffic; reachable flag distinguishes TCP-failure from
+        # "Cerbo up but MultiPlus voltage out of range" (e.g. inverter off/standby).
+        if battery_voltages:
+            read_cerbo_dc_voltage(settings.get('cerbo_ip', '192.168.15.67'))  # refresh cache
+            if _cerbo_dc_cache.get('reachable', False):
                 settings['_cerbo_last_seen'] = time.time()
                 all_alerts = [a for a in all_alerts if 'Cerbo GX unreachable' not in a]
             else:

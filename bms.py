@@ -3380,6 +3380,28 @@ def startup_self_test(settings, stdscr, data_dir):
                     y += 2
                     stdscr.refresh()
                     continue
+                # Skip if banks are too balanced to detect transfer -- not a relay failure.
+                _min_diff = settings['min_voltage_delta'] * 5  # need 5x min_delta differential
+                if abs(initial_source_v - initial_dest_v) < _min_diff:
+                    _skip_msg = (
+                        'Balance test Bank %d->%d skipped: '
+                        'differential %.3fV < %.3fV minimum -- banks too balanced, not a relay failure.'
+                        % (source, dest, abs(initial_source_v - initial_dest_v), _min_diff)
+                    )
+                    event_log.append(time.strftime('%Y-%m-%d %H:%M:%S') + ': ' + _skip_msg)
+                    if len(event_log) > settings.get('EventLogSize', 20):
+                        event_log.pop(0)
+                    logging.info(_skip_msg)
+                    if y + 1 < stdscr.getmaxyx()[0]:
+                        try:
+                            stdscr.addstr(y + 1, 0,
+                                'Skipped (banks balanced): %.3fV vs %.3fV' % (initial_source_v, initial_dest_v),
+                                curses.color_pair(3))
+                        except curses.error:
+                            pass
+                    y += 2
+                    stdscr.refresh()
+                    continue
                 # Start test balance.
                 set_relay_connection(source, dest, settings)
                 time.sleep(0.5)  # Allow relays to settle
@@ -3827,9 +3849,10 @@ def update_modbus_registers(settings):
     # blindly publish them without needing local decision logic.
     high_v_alarm = any('high voltage' in a.lower() or 'high_voltage' in a.lower() for a in alerts)
     low_v_alarm  = any('low voltage'  in a.lower() or 'low_voltage'  in a.lower() for a in alerts)
-    bms_error    = system_status in ('Error', 'Alert')
-    registers[330] = 0 if (high_v_alarm or bms_error) else 1  # AllowToCharge
-    registers[331] = 0 if (low_v_alarm  or bms_error) else 1  # AllowToDischarge
+    # bms_error (Alert/Error) from balancer failures must NOT cut charging/discharging --
+    # that shuts the inverter down. Only true voltage safety alarms gate these.
+    registers[330] = 0 if high_v_alarm else 1   # AllowToCharge: cut only on high-voltage alarm
+    registers[331] = 0 if low_v_alarm  else 1   # AllowToDischarge: cut only on low-voltage alarm
 
     # Store in global cache
     modbus_registers = registers
@@ -5459,6 +5482,7 @@ def main(stdscr):
                         _measured = _cerbo_dc_v - _bms_total   # real physical cable drop
                         _new_drop = round(0.1 * _measured + 0.9 * _old_drop, 3)
                         _new_drop = max(0.0, min(1.0, _new_drop))  # hard cap at 1V
+                        _new_drop = min(_new_drop, _old_drop + 0.02)  # rate-limit: max 0.02V/cycle
                         if abs(_new_drop - _old_drop) >= 0.005:
                             settings['cable_drop_compensation'] = _new_drop
                             logging.debug(f'Cable drop updated: {_old_drop:.3f}V -> {_new_drop:.3f}V '

@@ -426,7 +426,6 @@ data_lock = threading.Lock() # Lock for thread-safe access to web_data
 modbus_server_running = False
 modbus_datastore = None
 modbus_registers = {}  # Cache of register values
-mdns_process = None  # mDNS service advertisement process for Victron discovery
 
 def check_dependencies():
     """
@@ -625,7 +624,7 @@ def modbus_crc(data):
 
 _cerbo_dc_cache = {'v': None, 'ts': 0.0, 'reachable': False}   # module-level cache for Cerbo DC voltage
 
-def read_cerbo_dc_voltage(cerbo_ip, cache_ttl=5.0):
+def read_cerbo_dc_voltage(cerbo_ip, cache_ttl=30.0):
     """Read Cerbo GX VE.Bus DC bus voltage via raw Modbus TCP (unit 227, reg 26, scale 0.01V).
 
     This is the MultiPlus/Quattro's own measurement of its DC terminals — independent of
@@ -3931,83 +3930,6 @@ def modbus_updater_thread(context, settings):
             time.sleep(1)
 
 
-def start_mdns_advertisement(port, unit_id=1):
-    """
-    Start mDNS service advertisement for Victron Cerbo GX discovery.
-    Uses avahi-publish-service to advertise the Modbus TCP service.
-    
-    Args:
-        port (int): Modbus TCP port.
-        unit_id (int): Modbus unit/slave ID.
-    
-    Returns:
-        subprocess.Popen: The mDNS process or None if failed.
-    """
-    global mdns_process
-    
-    try:
-        # Check if avahi-publish-service is available
-        import shutil
-        if not shutil.which("avahi-publish-service"):
-            logging.warning("avahi-publish-service not found - mDNS advertisement disabled")
-            return None
-        
-        # Kill any existing mDNS process
-        if mdns_process and mdns_process.poll() is None:
-            mdns_process.terminate()
-            try:
-                mdns_process.wait(timeout=5)
-            except Exception:
-                mdns_process.kill()
-        
-        # Start mDNS advertisement
-        # Service type: _modbus._tcp (standard Modbus TCP service)
-        # TXT records: device info for Victron compatibility
-        txt_records = [
-            f"unit_id={unit_id}",
-            "device_type=battery",
-            "manufacturer=BMS",
-            "model=Battery Management System"
-        ]
-        
-        cmd = [
-            "avahi-publish-service",
-            "-s",
-            "BMS Battery Monitor",  # Service name
-            "_modbus._tcp",  # Service type
-            str(port)  # Port
-        ] + txt_records
-        
-        mdns_process = subprocess.Popen(
-            cmd,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL
-        )
-        logging.info(f"mDNS service advertisement started: _modbus._tcp on port {port}")
-        return mdns_process
-        
-    except Exception as e:
-        logging.error(f"Failed to start mDNS advertisement: {e}")
-        return None
-
-def stop_mdns_advertisement():
-    """
-    Stop the mDNS service advertisement.
-    """
-    global mdns_process
-    
-    if mdns_process and mdns_process.poll() is None:
-        try:
-            mdns_process.terminate()
-            mdns_process.wait(timeout=5)
-            logging.info("mDNS service advertisement stopped")
-        except Exception as e:
-            logging.error(f"Error stopping mDNS advertisement: {e}")
-            try:
-                mdns_process.kill()
-            except:
-                pass
-    mdns_process = None
 
 def start_modbus_server(settings):
     """
@@ -4103,8 +4025,6 @@ def start_modbus_server(settings):
     _modbus_wd.start()
     logging.info('Modbus server watchdog started.')
 
-    # Start mDNS service advertisement for Victron Cerbo GX discovery
-    start_mdns_advertisement(settings['port'], settings.get('unit_id', 1))
 
 
 def start_web_server(settings):

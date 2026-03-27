@@ -5386,18 +5386,36 @@ def main(stdscr):
         if len(_v_history) > 5: _v_history = _v_history[-5:]
         settings['_v_history'] = _v_history
         _v_trend = (_v_history[-1] - _v_history[0]) if len(_v_history) >= 2 else 0.0
+        _cerbo_dc_for_state = _cerbo_dc_cache.get('v')
         if _pack_v <= 0:
             _charge_state = 'Idle'
-        elif _v_trend < -0.1:
-            _charge_state = 'Discharging'
-        elif _v_trend > 0.1 and _pack_v < _cv_target - 2.0:
-            _charge_state = 'Bulk'
-        elif _pack_v >= _cv_target - 0.5 and abs(_v_trend) <= 0.15:
-            _charge_state = 'Float'
-        elif _pack_v >= _cv_target - 2.0:
-            _charge_state = 'Absorption'
+        elif _cerbo_dc_for_state is not None and _cerbo_dc_cache.get('reachable', False):
+            # Cerbo DC available: use current direction as primary signal.
+            # cerbo_dc < pack_v -> MultiPlus is a sink (inverting) -> Discharging.
+            # cerbo_dc > pack_v -> MultiPlus is a source (charging) -> determine phase.
+            if _cerbo_dc_for_state < _pack_v - 0.1:
+                _charge_state = 'Discharging'
+            elif _cerbo_dc_for_state > _pack_v + 0.05:
+                if _pack_v >= _cv_target - 0.5 and abs(_v_trend) <= 0.15:
+                    _charge_state = 'Float'
+                elif _pack_v >= _cv_target - 2.0:
+                    _charge_state = 'Absorption'
+                else:
+                    _charge_state = 'Bulk'
+            else:
+                _charge_state = 'Idle'  # near-zero current / standby
         else:
-            _charge_state = 'Idle'
+            # Cerbo unavailable: fall back to voltage trend heuristic.
+            if _v_trend < -0.1:
+                _charge_state = 'Discharging'
+            elif _v_trend > 0.1 and _pack_v < _cv_target - 2.0:
+                _charge_state = 'Bulk'
+            elif _pack_v >= _cv_target - 0.5 and abs(_v_trend) <= 0.15:
+                _charge_state = 'Float'
+            elif _pack_v >= _cv_target - 2.0:
+                _charge_state = 'Absorption'
+            else:
+                _charge_state = 'Idle'
         settings['_charge_state'] = _charge_state
         with data_lock:
             web_data['charge_state'] = _charge_state

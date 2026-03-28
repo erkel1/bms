@@ -47,8 +47,9 @@ Set the target voltage at the battery terminals. The BMS automatically compensat
 | Field | Description |
 |-------|-------------|
 | `charge_voltage` | Target voltage at battery terminals (V), max 63V |
-| `cable_drop_compensation` | Auto-learned cable resistance drop (V), read-only |
-| `cerbo_voltage` | Actual setpoint sent to Cerbo/MPPT (= target + compensation) |
+| `cable_drop_compensation` | Auto-learned cable resistance drop (V), read-only, resets to 0 on restart |
+| `cerbo_voltage` | Actual CVL sent to Cerbo (= target + compensation; capped at 63V; drops to target if HV clamp active) |
+| `cerbo_dc_voltage` | Measured Cerbo GX DC bus voltage (V); used to calculate cable drop; null if Cerbo unreachable |
 
 **Cable drop compensation** only learns when the charger is in CV mode (voltage stable, `|trend| < 0.15V/5-cycles`). It automatically decays if the battery exceeds the target. Not persisted across restarts — relearned each session.
 
@@ -113,12 +114,21 @@ Charge current is linearly reduced between `cold_charge_min` and `cold_charge_cu
 If any bank reaches `HighVoltageThresholdPerBattery`, the charge voltage limit sent to the Cerbo is clamped to the current pack voltage (stopping further charge). Releases automatically when all banks drop below the threshold.
 
 ### Auto Cable Drop Compensation
-The BMS measures the gap between the commanded Cerbo CVL and the actual battery terminal voltage. This gap equals the cable resistance voltage drop when the charger is in CV mode. An EMA (α=0.1) tracks this and adjusts the Cerbo setpoint upward to compensate.
+The BMS reads the Cerbo GX's own DC bus voltage (MultiPlus terminal, Modbus TCP unit 227 reg 26) and compares it to the BMS battery terminal voltage. When the charger is sourcing current, the MultiPlus output is slightly above the battery terminal — that gap is the real resistive cable drop.
+
+An EMA (α=0.1) tracks the measured drop and adjusts the Cerbo CVL setpoint upward to compensate, so the battery actually reaches the target voltage despite cable losses.
+
+**Learning conditions** (all must be met):
+- Cerbo DC voltage > BMS battery voltage (charging direction confirmed)
+- Battery within 2V of target (CV mode — not bulk)
+- Voltage trend stable (|ΔV over 5 cycles| < 0.15V)
+- Not in active balancing, no voltage alerts, no HV clamp active
 
 **Limits:**
-- Maximum compensatable drop: `63V − target` (e.g. 2.7V for a 60.3V target)
-- Bootstrap limit from zero: ~2V (battery must reach within 2V of target for learning to start)
-- Does not learn in CC mode (gated by voltage stability check)
+- Hard cap: 1.0V maximum compensation (prevents dangerous overvoltage)
+- Rate limit: max 0.02V increase per poll cycle
+- Decays ×0.9 per cycle if battery is already 0.3V above target
+- Resets to 0.0V on every BMS restart — relearned each session
 
 ### Discharge Voltage Cable Drop
 A fixed manual offset (`discharge_cable_drop`) is subtracted from the minimum discharge voltage sent to the Cerbo. Use this to compensate for cable drop on the discharge path.

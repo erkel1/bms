@@ -13,14 +13,18 @@ A Python-based Battery Management System for monitoring and managing large lithi
 
 ## Architecture
 
-The pack is 3 banks wired in series. Each bank has 8 temperature sensors. A Cerbo GX connects over Modbus TCP to read charge/discharge limits and publish them to the MPPT solar charger via DVCC.
+The pack is 3 banks wired in series. Each bank has 8 parallel batteries and 8 temperature sensors (192 sensors total). The Pi pushes DVCC charge limits directly to the Cerbo GX via Modbus TCP writes every 30 seconds. No custom driver runs on the Cerbo.
 
 ```
-[Solar MPPT] <-- DVCC <-- [Cerbo GX] <-- Modbus TCP/502 <-- [Raspberry Pi BMS]
-                                                                      |
-                                                             [Battery Pack 3S]
-                                                             [NTC Sensors x24]
+[Solar MPPT] <-- DVCC <-- [Cerbo GX] <-- Modbus TCP writes (CVL/CCL) -- [Raspberry Pi BMS]
+                              |  |                                               |
+                              |  +-- EM24 polls (bank voltages) ----------------+
+                              |
+                         [SmartShunt]  -- SOC / current tracking
+                         [Node-RED]    -- virtual battery D-Bus service (Venus OS Large)
 ```
+
+See [cerbo_gx/README.md](cerbo_gx/README.md) for full Cerbo GX integration details.
 
 ## Running
 
@@ -146,6 +150,6 @@ Rotated: 10MB per file, 10 files max (~100MB total).
 
 ## Known Issues / Limitations
 
-- **Cerbo GX SSH**: The `dbus-bms-battery.py` driver on the Cerbo may need a manual restart after initial setup or Modbus address changes.
 - **Cable drop maximum**: For >2.7V drop (60.3V target), consider lower target voltage or thicker cable.
+- **Cerbo IP changes**: The Cerbo GX uses DHCP. If its IP changes after a reflash, update `[CerboGX] ip` in `battery_monitor.ini` on the Pi.
 - **RRD history**: Requires `rrdtool` installed for chart history.

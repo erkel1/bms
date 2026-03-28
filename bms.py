@@ -623,6 +623,7 @@ def modbus_crc(data):
     return crc.to_bytes(2, 'little')
 
 _cerbo_dc_cache = {'v': None, 'ts': 0.0, 'reachable': False}   # module-level cache for Cerbo DC voltage
+_cerbo_dvcc_write_cache = {'cvl': -1.0, 'max_a': -1.0, 'high_v': None, 'ts': 0.0}  # last values written to Cerbo settings
 
 def read_cerbo_dc_voltage(cerbo_ip, cache_ttl=30.0):
     """Read Cerbo GX VE.Bus DC bus voltage via raw Modbus TCP (unit 227, reg 26, scale 0.01V).
@@ -664,6 +665,38 @@ def read_cerbo_dc_voltage(cerbo_ip, cache_ttl=30.0):
     _cerbo_dc_cache['v'] = None  # negative cache: failed attempt, wait cache_ttl before retry
     _cerbo_dc_cache['ts'] = now
     return None
+
+
+def write_cerbo_dvcc_direct(cerbo_ip, cvl_volts, max_charge_a):
+    """Write DVCC charge voltage and current limits to Cerbo GX settings via Modbus TCP.
+
+    Uses com.victronenergy.settings writable registers:
+      - reg 2710 (unit 100): Settings/SystemSetup/MaxChargeVoltage (register value = volts × 10)
+      - reg 2705 (unit 100): Settings/SystemSetup/MaxChargeCurrent (register value = amps)
+
+    This approach requires no custom software on the Cerbo — just Modbus TCP enabled in settings.
+    Pass cvl_volts=49.5 to stop charging (high-voltage alarm).
+
+    Returns True on success.
+    """
+    global _cerbo_dvcc_write_cache
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        s.settimeout(1.0)
+        s.connect((cerbo_ip, 502))
+
+        def _write_reg(unit, reg, val):
+            req = struct.pack('>HHHBBHH', 1, 0, 6, unit, 6, reg, max(0, min(65535, int(round(val)))))
+            s.sendall(req)
+            s.recv(256)
+
+        _write_reg(100, 2710, round(cvl_volts * 10))  # MaxChargeVoltage (volts × 10)
+        _write_reg(100, 2705, int(max_charge_a))       # MaxChargeCurrent (amps)
+        s.close()
+        return True
+    except Exception as e:
+        logging.debug(f'Cerbo DVCC direct write failed: {e}')
+        return False
 
 
 def test_modbus_connectivity(ip, port):
@@ -3945,6 +3978,28 @@ def modbus_updater_thread(context, settings):
             # Write to datastore
             if registers and context:
                 write_registers_to_datastore(context, registers)
+            
+            # Also push CVL and current limits directly to Cerbo GX settings via Modbus TCP.
+            # This requires no custom driver on the Cerbo — just Modbus TCP enabled in settings.
+            # The SmartShunt (ttyUSB0) remains the active battery monitor; DVCC uses these values.
+            if registers:
+                _now = time.time()
+                _cvl     = registers.get(305, 603) / 10.0   # reg 305 is already x10
+                _max_a   = registers.get(307, 2000) / 10.0  # reg 307 is x10 A
+                _high_v  = (registers.get(330, 1) == 0)     # AllowToCharge=0 -> high-voltage alarm
+                _cerbo_w_ip = settings.get('cerbo_ip', '192.168.15.67')
+                _cvl_send = 49.5 if _high_v else _cvl       # 49.5V stops charging in emergency
+                _write_now = (
+                    _now - _cerbo_dvcc_write_cache.get('ts', 0) >= 30.0 or
+                    abs(_cvl - _cerbo_dvcc_write_cache.get('cvl', -1)) >= 0.05 or
+                    _high_v != _cerbo_dvcc_write_cache.get('high_v', None)
+                )
+                if _write_now:
+                    if write_cerbo_dvcc_direct(_cerbo_w_ip, _cvl_send, _max_a):
+                        _cerbo_dvcc_write_cache.update({'ts': _now, 'cvl': _cvl, 'max_a': _max_a, 'high_v': _high_v})
+                        logging.debug(f'Cerbo DVCC direct write: CVL={_cvl_send:.1f}V max_a={_max_a:.0f}A high_v={_high_v}')
+                    else:
+                        logging.debug('Cerbo DVCC direct write failed -- will retry next cycle')
             
             # Wait for next update
             time.sleep(update_interval)

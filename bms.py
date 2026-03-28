@@ -3685,7 +3685,7 @@ def create_modbus_datastore(num_banks):
     
     # Create holding register block (100 registers starting at address 0)
     # Each register is 16-bit unsigned (0-65535)
-    holding_block = ModbusSequentialDataBlock(0, [0]*40962)
+    holding_block = ModbusSequentialDataBlock(0, [0]*41218)  # covers 0xa100 (SwitchPos=41216, internal idx 41217)
     
     # Create slave context with the holding register block
     slave_context = ModbusDeviceContext(

@@ -1,0 +1,13 @@
+[
+  {"id":"victron-client-id","type":"victron-client","name":"Victron","enablePolling":false,"showValues":true,"contextStore":""},
+
+  {"id":"bms_tab","type":"tab","label":"BMS Monitor","disabled":false,"info":""},
+
+  {"id":"inj1","type":"inject","z":"bms_tab","name":"poll 5s","props":[{"p":"payload"}],"repeat":"5","crontab":"","once":true,"onceDelay":"2","topic":"","payload":"","payloadType":"date","x":130,"y":80,"wires":[["http1"]]},
+
+  {"id":"http1","type":"http request","z":"bms_tab","name":"BMS API","method":"GET","ret":"obj","paytoqs":"ignore","url":"http://192.168.15.137:8080/api/status","tls":"","persist":false,"proxy":"","insecureHTTPParser":false,"authType":"","senderr":false,"headers":[],"x":320,"y":80,"wires":[["fn1"]]},
+
+  {"id":"fn1","type":"function","z":"bms_tab","name":"Parse BMS","func":"const s = msg.payload;\nconst temps = s.temperatures || [];\nconst maxTemp = temps.length ? Math.max(...temps) : null;\nconst alerts = s.alerts || [];\nconst isHV = Array.isArray(alerts) ? alerts.some(a => /high.?v/i.test(String(a))) : !!(alerts.high_voltage);\nconst isLV = Array.isArray(alerts) ? alerts.some(a => /low.?v/i.test(String(a))) : !!(alerts.low_voltage);\nconst isHT = Array.isArray(alerts) ? alerts.some(a => /high.?t/i.test(String(a))) : !!(alerts.high_temp);\nmsg.payload = {\n  'Dc/0/Voltage': s.total_voltage || null,\n  'Dc/0/Temperature': maxTemp,\n  'Info/MaxChargeVoltage': s.charge_voltage || null,\n  'Info/MaxChargeCurrent': s.dvcc_max_charge_current || null,\n  'Info/MaxDischargeCurrent': s.dvcc_max_discharge_current || null,\n  'Alarms/HighVoltage': isHV ? 2 : 0,\n  'Alarms/LowVoltage': isLV ? 2 : 0,\n  'Alarms/HighTemperature': isHT ? 2 : 0,\n  'Connected': s.system_status === 'Running' ? 1 : 0\n};\nreturn msg;\n","outputs":1,"noerr":0,"initialize":"","finalize":"","libs":[],"x":520,"y":80,"wires":[["vv_bat"]]},
+
+  {"id":"vv_bat","type":"victron-virtual","z":"bms_tab","name":"BMS Battery","device":"battery","include_battery_temperature":true,"x":730,"y":80,"wires":[[]]}
+]

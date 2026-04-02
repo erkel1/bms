@@ -1004,12 +1004,13 @@ def weighted_average(trend):
         return None
     if len(trend) == 1:
         return trend[0]
-    # Exponential weighting: recent values weighted more heavily
-    # Using decay factor that gives ~70% weight to last 50% of readings
-    decay = 0.5  # Controls how much recent readings are emphasized
+    # Exponential weighting: recent values weighted more heavily.
+    # decay=0.85 gives meaningful weight to early readings (0.85^29 ≈ 0.9% for 30 points)
+    # while still emphasizing the end-of-balance state. The old decay=0.5 made early
+    # readings effectively zero (0.5^29 ≈ 0.0000002%), defeating the smoothing purpose.
+    decay = 0.85
     weights = []
     for i in range(len(trend)):
-        # Weight increases towards the end of the list
         weight = decay ** (len(trend) - 1 - i)
         weights.append(weight)
     total_weight = sum(weights)
@@ -2377,50 +2378,63 @@ def balance_battery_voltages(stdscr, high, low, settings, temps_alerts, is_heati
         with data_lock:
             web_data['balancing'] = False
         last_balance_time = time.time()
-    # Verify: Check changes using AVERAGED readings, not discrete final readings
-    # This avoids false failures due to DC-DC converter pulsing at the exact moment of final read
+    # Verify: Check if the voltage DIFFERENTIAL between banks narrowed.
+    # This correctly handles external factors (charging, load changes, appliances toggling)
+    # that shift all bank voltages together as a common-mode signal.
+    # The DC-DC converter creates a differential signal (lowers source, raises dest),
+    # so checking gap reduction cancels out common-mode effects.
     if len(high_trend) >= 3 and len(low_trend) >= 3:
-        # Use averaged readings for verification (more stable)
         high_change = avg_high_v - initial_high_v
         low_change = avg_low_v - initial_low_v
-        # Also track discrete changes for logging
         discrete_high_change = final_high_v - initial_high_v
         discrete_low_change = final_low_v - initial_low_v
         min_delta = settings['min_voltage_delta']
-        # Expected: High decreases, low increases by at least min_delta.
-        if high_change >= 0 or low_change <= 0 or abs(high_change) < min_delta or low_change < min_delta:
-            # Check if discrete readings show different trend (would indicate converter pulsing)
-            if discrete_high_change < -min_delta and discrete_low_change > min_delta:
-                # Discrete readings show success, but averaged failed - likely averaging issue
-                alert = (f"Balancing ambiguous: Discrete shows change (High {discrete_high_change:+.3f}V, "
-                        f"Low {discrete_low_change:+.3f}V) but averaged shows insufficient "
-                        f"(High {high_change:+.3f}V, Low {low_change:+.3f}V). "
-                        f"Will NOT set balancer_failed - check DC-DC converter pulsing.")
-                logging.warning(alert)
-                event_log.append(f"{time.strftime('%Y-%m-%d %H:%M:%S')}: {alert}")
-                if len(event_log) > settings.get('EventLogSize', 20):
-                    event_log.pop(0)
-            else:
-                alert = (f"Balancing failed from Bank {high} to {low}: No voltage change detected "
-                        f"(Averaged High change: {high_change:+.3f}V, Low change: {low_change:+.3f}V, "
-                        f"Discrete High: {discrete_high_change:+.3f}V, Low: {discrete_low_change:+.3f}V). "
-                        f"Possible relay or DC-DC converter failure.")
-                event_log.append(f"{time.strftime('%Y-%m-%d %H:%M:%S')}: {alert}")
-                if len(event_log) > settings.get('EventLogSize', 20):
-                    event_log.pop(0)
-                logging.error(alert)
-                balancer_failed = True
-                balancer_failed_time = time.time()
-                balancer_fail_count += 1
-                balancer_fail_reason = alert
-        else:
-            # Success - log both averaged and discrete changes
-            logging.info(f"Balancing verified: Averaged change: High {high_change:+.3f}V, Low {low_change:+.3f}V | "
-                        f"Discrete change: High {discrete_high_change:+.3f}V, Low {discrete_low_change:+.3f}V.")
-            # Reset consecutive failure counter on success
+
+        # Primary metric: did the gap between banks narrow?
+        initial_diff = initial_high_v - initial_low_v
+        avg_diff = avg_high_v - avg_low_v
+        discrete_diff = final_high_v - final_low_v
+        diff_reduction = initial_diff - avg_diff          # positive = gap narrowed
+        discrete_diff_reduction = initial_diff - discrete_diff
+
+        logging.info(f"Balance verification: initial diff={initial_diff:.3f}V, "
+                    f"avg diff={avg_diff:.3f}V, discrete diff={discrete_diff:.3f}V | "
+                    f"reduction: avg={diff_reduction:+.3f}V, discrete={discrete_diff_reduction:+.3f}V | "
+                    f"absolute: High {high_change:+.3f}V, Low {low_change:+.3f}V | "
+                    f"threshold={min_delta}V")
+
+        if diff_reduction >= min_delta:
+            # Gap narrowed by at least min_delta - balancing worked
+            logging.info(f"Balancing verified (differential): gap narrowed {diff_reduction:+.3f}V "
+                        f"({initial_diff:.3f}V -> {avg_diff:.3f}V).")
             if balancer_fail_count > 0:
-                logging.info(f"Balancer recovery: successful verification after {balancer_fail_count} consecutive failure(s).")
+                logging.info(f"Balancer recovery: successful after {balancer_fail_count} consecutive failure(s).")
                 balancer_fail_count = 0
+        elif discrete_diff_reduction >= min_delta:
+            # Discrete shows gap narrowed but averaged doesn't - likely converter pulsing
+            alert = (f"Balancing ambiguous from Bank {high} to {low}: "
+                    f"Discrete diff reduction {discrete_diff_reduction:+.3f}V >= {min_delta}V threshold "
+                    f"but averaged {diff_reduction:+.3f}V below threshold. "
+                    f"Will NOT set balancer_failed.")
+            logging.warning(alert)
+            event_log.append(f"{time.strftime('%Y-%m-%d %H:%M:%S')}: {alert}")
+            if len(event_log) > settings.get('EventLogSize', 20):
+                event_log.pop(0)
+        else:
+            alert = (f"Balancing failed from Bank {high} to {low}: "
+                    f"Differential did not narrow enough "
+                    f"(initial gap: {initial_diff:.3f}V, avg gap: {avg_diff:.3f}V, "
+                    f"reduction: {diff_reduction:+.3f}V, needed: {min_delta}V | "
+                    f"Absolute: High {high_change:+.3f}V, Low {low_change:+.3f}V). "
+                    f"Possible relay or DC-DC converter failure.")
+            event_log.append(f"{time.strftime('%Y-%m-%d %H:%M:%S')}: {alert}")
+            if len(event_log) > settings.get('EventLogSize', 20):
+                event_log.pop(0)
+            logging.error(alert)
+            balancer_failed = True
+            balancer_failed_time = time.time()
+            balancer_fail_count += 1
+            balancer_fail_reason = alert
     else:
         logging.warning(f"Insufficient readings for balancing verification from {high} to {low}.")
     # Log end.
@@ -3509,26 +3523,26 @@ def startup_self_test(settings, stdscr, data_dir):
                                 f"Averaged change: {source_change:+.3f}V | "
                                 f"Min change={min_delta}V")
                     
-                    # Check if source is decreasing and destination is increasing
-                    # The key metric is the voltage differential between banks is reducing
-                    # When balancing source->dest: differential = source - dest
-                    # After transfer: differential should decrease
-                    source_decreasing = source_change < 0
-                    dest_increasing = dest_change > 0
-                    diff_reduced = (avg_source_v - avg_dest_v) < (initial_source_v - initial_dest_v)
-                    
-                    # Pass if: source decreasing AND dest increasing AND differential reduced
-                    if min_delta > 0 and not (source_decreasing and dest_increasing and diff_reduced):
-                        # Additional check: discrete readings might show success while averaged fails
-                        discrete_source_decreasing = discrete_source_change < 0
-                        discrete_dest_increasing = discrete_dest_change > 0
-                        discrete_diff_reduced = (final_source_v - final_dest_v) < (initial_source_v - initial_dest_v)
-                        
-                        if discrete_source_decreasing and discrete_dest_increasing and discrete_diff_reduced:
-                            # Discrete shows success, averaged fails - likely converter pulsing
-                            alert = (f"Balance test ambiguous: Discrete shows transfer working ({discrete_source_change:+.3f}V, {discrete_dest_change:+.3f}V) "
-                                    f"but averaged shows marginal ({source_change:+.3f}V, {dest_change:+.3f}V). "
-                                    f"NOT marking as failed - transfer is occurring.")
+                    # Primary metric: did the gap between source and dest narrow?
+                    # This cancels out common-mode voltage shifts from charging/load changes.
+                    initial_diff = initial_source_v - initial_dest_v
+                    avg_diff = avg_source_v - avg_dest_v
+                    discrete_diff = final_source_v - final_dest_v
+                    diff_reduction = initial_diff - avg_diff          # positive = gap narrowed
+                    discrete_diff_reduction = initial_diff - discrete_diff
+
+                    logging.debug(f"Balance test Bank {source}->{dest}: "
+                                f"diff {initial_diff:.3f}V -> avg {avg_diff:.3f}V (reduction {diff_reduction:+.3f}V) | "
+                                f"absolute: Src {source_change:+.3f}V, Dst {dest_change:+.3f}V | "
+                                f"threshold={min_delta}V")
+
+                    if min_delta > 0 and diff_reduction < min_delta:
+                        # Averaged diff didn't narrow enough - check discrete as fallback
+                        if discrete_diff_reduction >= min_delta:
+                            alert = (f"Balance test ambiguous Bank {source}->{dest}: "
+                                    f"Discrete diff reduction {discrete_diff_reduction:+.3f}V >= {min_delta}V "
+                                    f"but averaged {diff_reduction:+.3f}V below threshold. "
+                                    f"NOT marking as failed.")
                             alerts.append(alert)
                             event_log.append(f"{time.strftime('%Y-%m-%d %H:%M:%S')}: {alert}")
                             if len(event_log) > settings.get('EventLogSize', 20):
@@ -3536,13 +3550,15 @@ def startup_self_test(settings, stdscr, data_dir):
                             logging.warning(alert)
                             if progress_y + 1 < stdscr.getmaxyx()[0]:
                                 try:
-                                    stdscr.addstr(progress_y + 1, 0, f"Ambiguous: Discrete OK, averaged marginal ({source_change:+.3f}V, {dest_change:+.3f}V). Transfer OK.", curses.color_pair(3))
+                                    stdscr.addstr(progress_y + 1, 0, f"Ambiguous: discrete OK ({discrete_diff_reduction:+.3f}V), avg marginal ({diff_reduction:+.3f}V).", curses.color_pair(3))
                                 except curses.error:
                                     logging.warning("addstr error for ambiguous result.")
                         else:
                             alert = (f"Balance test from Bank {source} to Bank {dest} failed: "
-                                    f"Source {source_change:+.3f}V, Dest {dest_change:+.3f}V. "
-                                    f"Source dec={source_decreasing}, Dest inc={dest_increasing}, Diff reduced={diff_reduced}. "
+                                    f"Differential did not narrow "
+                                    f"(gap: {initial_diff:.3f}V -> {avg_diff:.3f}V, "
+                                    f"reduction: {diff_reduction:+.3f}V, needed: {min_delta}V | "
+                                    f"Absolute: Src {source_change:+.3f}V, Dst {dest_change:+.3f}V). "
                                     f"Possible relay failure.")
                             alerts.append(alert)
                             event_log.append(f"{time.strftime('%Y-%m-%d %H:%M:%S')}: {alert}")
@@ -3555,15 +3571,15 @@ def startup_self_test(settings, stdscr, data_dir):
                             balancer_fail_reason = alert
                             if progress_y + 1 < stdscr.getmaxyx()[0]:
                                 try:
-                                    stdscr.addstr(progress_y + 1, 0, f"Test FAILED: Source {source_change:+.3f}V, Dest {dest_change:+.3f}V. Diff {'reduced' if diff_reduced else 'not reduced'}.", curses.color_pair(2))
+                                    stdscr.addstr(progress_y + 1, 0, f"Test FAILED: gap {initial_diff:.3f}V -> {avg_diff:.3f}V (reduction {diff_reduction:+.3f}V < {min_delta}V).", curses.color_pair(2))
                                 except curses.error:
                                     logging.warning("addstr error for test failed.")
                     else:
-                        logging.debug(f"Balance test from Bank {source} to Bank {dest} passed: "
-                                    f"Averaged change: {source_change:+.3f}V source, {dest_change:+.3f}V dest.")
+                        logging.debug(f"Balance test Bank {source}->{dest} passed: "
+                                    f"gap narrowed {diff_reduction:+.3f}V ({initial_diff:.3f}V -> {avg_diff:.3f}V).")
                         if progress_y + 1 < stdscr.getmaxyx()[0]:
                             try:
-                                stdscr.addstr(progress_y + 1, 0, f"Test PASSED: Averaged {source_change:+.3f}V, {dest_change:+.3f}V.", curses.color_pair(4))
+                                stdscr.addstr(progress_y + 1, 0, f"Test PASSED: gap narrowed {diff_reduction:+.3f}V.", curses.color_pair(4))
                             except curses.error:
                                 logging.warning("addstr error for test passed.")
                 else:
@@ -5398,20 +5414,34 @@ def main(stdscr):
             logging.warning("Resetting balancing_active flag - balancer_failed prevents balancing")
             balancing_active = False
         # Auto-recovery: Reset balancer_failed after cooldown period to allow retry.
-        # Cooldown escalates: 300s (5min) for first failure, 1800s (30min) after 3+ consecutive failures.
+        # Cooldown escalates: 300s, 1800s, then stops after 5 consecutive failures.
+        max_consecutive_failures = 5
         if balancer_failed and balancer_failed_time is not None:
-            cooldown = 1800 if balancer_fail_count >= 3 else 300
-            elapsed = time.time() - balancer_failed_time
-            if elapsed >= cooldown:
-                logging.warning(f"Auto-recovery: Resetting balancer_failed after {elapsed:.0f}s cooldown "
-                              f"(fail_count={balancer_fail_count}, cooldown was {cooldown}s). "
-                              f"Will retry balancing on next cycle.")
-                event_log.append(f"{time.strftime('%Y-%m-%d %H:%M:%S')}: Auto-recovery: balancer reset after {cooldown}s cooldown (failures: {balancer_fail_count})")
-                if len(event_log) > settings.get('EventLogSize', 20):
-                    event_log.pop(0)
-                balancer_failed = False
-                balancer_failed_time = None
-                balancer_fail_reason = ""
+            if balancer_fail_count >= max_consecutive_failures:
+                # Too many consecutive failures - likely real hardware issue. Stop retrying.
+                if not settings.get('_hard_fail_logged', False):
+                    logging.error(f"Balancer permanently disabled: {balancer_fail_count} consecutive failures. "
+                                 f"Restart BMS to re-enable. Last: {balancer_fail_reason}")
+                    event_log.append(f"{time.strftime('%Y-%m-%d %H:%M:%S')}: Balancer disabled after {balancer_fail_count} failures - restart required")
+                    if len(event_log) > settings.get('EventLogSize', 20):
+                        event_log.pop(0)
+                    send_alert_email(f"Balancer permanently disabled after {balancer_fail_count} consecutive failures.\n"
+                                   f"Last reason: {balancer_fail_reason}\n"
+                                   f"Restart BMS to re-enable balancing.", settings)
+                    settings['_hard_fail_logged'] = True
+            else:
+                cooldown = 1800 if balancer_fail_count >= 3 else 300
+                elapsed = time.time() - balancer_failed_time
+                if elapsed >= cooldown:
+                    logging.warning(f"Auto-recovery: Resetting balancer_failed after {elapsed:.0f}s cooldown "
+                                  f"(fail_count={balancer_fail_count}/{max_consecutive_failures}, cooldown was {cooldown}s). "
+                                  f"Will retry balancing on next cycle.")
+                    event_log.append(f"{time.strftime('%Y-%m-%d %H:%M:%S')}: Auto-recovery: balancer reset after {cooldown}s cooldown (failures: {balancer_fail_count}/{max_consecutive_failures})")
+                    if len(event_log) > settings.get('EventLogSize', 20):
+                        event_log.pop(0)
+                    balancer_failed = False
+                    balancer_failed_time = None
+                    balancer_fail_reason = ""
         # Balance decision.
         if len(battery_voltages) == NUM_BANKS and not balancer_failed:
             max_v = max(battery_voltages) # Find highest voltage bank

@@ -277,6 +277,7 @@ try:
 except ImportError:
     fcntl = None
 import struct # For watchdog struct - data packer.
+from collections import deque # Thread-safe, O(1) append/pop container for event log.
 # Modbus TCP server for Victron Cerbo GX integration
 try:
     from pymodbus.server import StartTcpServer
@@ -403,7 +404,7 @@ balancer_failed_time = None # Timestamp when balancer_failed was set - for auto-
 balancer_fail_count = 0 # Consecutive balance failure count - escalates recovery cooldown.
 balancer_fail_reason = "" # Stores the specific reason for the last balance failure - shown in GUI.
 web_server = None # Web server object - web host.
-event_log = [] # Stores the last N events (configurable) - event history.
+event_log = deque(maxlen=20) # Stores the last N events - thread-safe, auto-bounded.
 web_data = {
     'voltages': [], # Will be filled dynamically based on num_series_banks
     'temperatures': [], # Will be filled dynamically based on total_channels
@@ -692,14 +693,20 @@ def write_cerbo_dvcc_direct(cerbo_ip, cvl_volts, max_charge_a):
         s.settimeout(1.0)
         s.connect((cerbo_ip, 502))
 
-        def _write_reg(unit, reg, val):
-            req = struct.pack('>HHHBBHH', 1, 0, 6, unit, 6, reg, max(0, min(65535, int(round(val)))))
+        def _write_reg(tid, unit, reg, val):
+            clamped = max(0, min(65535, int(round(val))))
+            req = struct.pack('>HHHBBHH', tid, 0, 6, unit, 6, reg, clamped)
             s.sendall(req)
-            s.recv(256)
+            resp = s.recv(256)
+            # Verify: response must echo function code 6, not exception 0x86
+            if len(resp) >= 8 and (resp[7] & 0x80):
+                logging.warning(f'Cerbo Modbus exception for reg {reg}: func=0x{resp[7]:02X}')
+                return False
+            return True
 
-        _write_reg(100, 2710, round(cvl_volts * 10))  # MaxChargeVoltage (volts × 10)
-        _write_reg(100, 2705, int(max_charge_a))       # MaxChargeCurrent (amps)
-        return True
+        ok1 = _write_reg(1, 100, 2710, round(cvl_volts * 10))  # MaxChargeVoltage (volts × 10)
+        ok2 = _write_reg(2, 100, 2705, int(max_charge_a))       # MaxChargeCurrent (amps)
+        return ok1 and ok2
     except Exception as e:
         logging.debug(f'Cerbo DVCC direct write failed: {e}')
         return False
@@ -1658,8 +1665,7 @@ def check_invalid_reading(raw, ch, alerts, valid_min, settings):
         # Add to event log with timestamp.
         event_log.append(f"{time.strftime('%Y-%m-%d %H:%M:%S')}: {alert}")
         # Trim log if too long.
-        if len(event_log) > settings.get('EventLogSize', 20):
-            event_log.pop(0)
+
         # Log warning.
         logging.warning(f"Invalid reading on Battery {bat_id} Bank {bank} Local Ch {local_ch}: {raw} ≤ {valid_min}.")
         return True  # Invalid.
@@ -1690,8 +1696,7 @@ def check_high_temp(calibrated, ch, alerts, high_threshold, settings):
         alert = f"Battery {bat_id} Bank {bank} Local Ch {local_ch}: High temp ({calibrated:.1f}°C > {high_threshold}°C)."
         alerts.append(alert)
         event_log.append(f"{time.strftime('%Y-%m-%d %H:%M:%S')}: {alert}")
-        if len(event_log) > settings.get('EventLogSize', 20):
-            event_log.pop(0)
+
         logging.warning(f"High temp alert on Battery {bat_id} Bank {bank} Local Ch {local_ch}: {calibrated:.1f} > {high_threshold}.")
 
 def check_low_temp(calibrated, ch, alerts, low_threshold, settings):
@@ -1716,8 +1721,7 @@ def check_low_temp(calibrated, ch, alerts, low_threshold, settings):
         alert = f"Battery {bat_id} Bank {bank} Local Ch {local_ch}: Low temp ({calibrated:.1f}°C < {low_threshold}°C)."
         alerts.append(alert)
         event_log.append(f"{time.strftime('%Y-%m-%d %H:%M:%S')}: {alert}")
-        if len(event_log) > settings.get('EventLogSize', 20):
-            event_log.pop(0)
+
         logging.warning(f"Low temp alert on Battery {bat_id} Bank {bank} Local Ch {local_ch}: {calibrated:.1f} < {low_threshold}.")
 
 def check_deviation(calibrated, bank_median, ch, alerts, abs_deviation_threshold, deviation_threshold, settings):
@@ -1752,8 +1756,7 @@ def check_deviation(calibrated, bank_median, ch, alerts, abs_deviation_threshold
         alert = f"Battery {bat_id} Bank {bank} Local Ch {local_ch}: Deviation from bank median (abs {abs_dev:.1f}°C or {rel_dev:.2%})."
         alerts.append(alert)
         event_log.append(f"{time.strftime('%Y-%m-%d %H:%M:%S')}: {alert}")
-        if len(event_log) > settings.get('EventLogSize', 20):
-            event_log.pop(0)
+
         logging.warning(f"Deviation alert on Battery {bat_id} Bank {bank} Local Ch {local_ch}: abs {abs_dev:.1f}, rel {rel_dev:.2%}.")
 
 def check_abnormal_rise(current, previous_temps, ch, alerts, poll_interval, rise_threshold, settings):
@@ -1794,8 +1797,7 @@ def check_abnormal_rise(current, previous_temps, ch, alerts, poll_interval, rise
             alert = f"Battery {bat_id} Bank {bank} Local Ch {local_ch}: Abnormal rise ({rise:.1f}°C in {poll_interval}s)."
             alerts.append(alert)
             event_log.append(f"{time.strftime('%Y-%m-%d %H:%M:%S')}: {alert}")
-            if len(event_log) > settings.get('EventLogSize', 20):
-                event_log.pop(0)
+
             logging.warning(f"Abnormal rise alert on Battery {bat_id} Bank {bank} Local Ch {local_ch}: {rise:.1f}°C.")
 
 def check_group_tracking_lag(current, previous_temps, bank_median_rise, ch, alerts, disconnection_lag_threshold, settings):
@@ -1831,8 +1833,7 @@ def check_group_tracking_lag(current, previous_temps, bank_median_rise, ch, aler
             alert = f"Battery {bat_id} Bank {bank} Local Ch {local_ch}: Lag from bank group ({rise:.1f}°C vs {bank_median_rise:.1f}°C)."
             alerts.append(alert)
             event_log.append(f"{time.strftime('%Y-%m-%d %H:%M:%S')}: {alert}")
-            if len(event_log) > settings.get('EventLogSize', 20):
-                event_log.pop(0)
+
             logging.warning(f"Lag alert on Battery {bat_id} Bank {bank} Local Ch {local_ch}: rise {rise:.1f} vs median {bank_median_rise:.1f}.")
 
 def check_sudden_disconnection(current, previous_temps, ch, alerts, settings):
@@ -1862,8 +1863,7 @@ def check_sudden_disconnection(current, previous_temps, ch, alerts, settings):
         alert = f"Battery {bat_id} Bank {bank} Local Ch {local_ch}: Sudden disconnection."
         alerts.append(alert)
         event_log.append(f"{time.strftime('%Y-%m-%d %H:%M:%S')}: {alert}")
-        if len(event_log) > settings.get('EventLogSize', 20):
-            event_log.pop(0)
+
         logging.warning(f"Sudden disconnection alert on Battery {bat_id} Bank {bank} Local Ch {local_ch}.")
 
 def choose_channel(channel, multiplexer_address):
@@ -1987,7 +1987,10 @@ def read_voltage_with_retry(bank_id, settings):
                 # FullScale = 6.144V when PGA gain = 1 (±6.144V range)
                 # FSR based on PGA gain:
                 # 0x0000: 6.144V, 0x0200: 4.096V, 0x0400: 2.048V, 0x0600: 1.024V, 0x0800: 0.512V
-                fsr = 6.144  # For gain 0x0000 (±6.144V range)
+                # Derive FSR from configured PGA gain to avoid mismatch
+                _gain_fsr = {0x0000: 6.144, 0x0200: 4.096, 0x0400: 2.048,
+                             0x0600: 1.024, 0x0800: 0.512, 0x0A00: 0.256}
+                fsr = _gain_fsr.get(settings['GainConfig'], 6.144)
                 
                 # Byte swap ADS1115 big-endian to little-endian
                 swapped_adc = ((raw_adc & 0xFF) << 8) | ((raw_adc >> 8) & 0xFF)
@@ -2189,8 +2192,7 @@ def check_for_issues(voltages, temps_alerts, settings):
             alert = f"Bank {i}: Zero voltage."
             alerts.append(alert)
             event_log.append(f"{time.strftime('%Y-%m-%d %H:%M:%S')}: {alert}")
-            if len(event_log) > settings.get('EventLogSize', 20):
-                event_log.pop(0)
+
             logging.warning(f"Zero voltage alert on Bank {i}.")
             alert_needed = True
         elif v > settings['HighVoltageThresholdPerBattery']:
@@ -2198,8 +2200,7 @@ def check_for_issues(voltages, temps_alerts, settings):
             alert = f"Bank {i}: High voltage ({v:.2f}V)."
             alerts.append(alert)
             event_log.append(f"{time.strftime('%Y-%m-%d %H:%M:%S')}: {alert}")
-            if len(event_log) > settings.get('EventLogSize', 20):
-                event_log.pop(0)
+
             logging.warning(f"High voltage alert on Bank {i}: {v:.2f}V.")
             alert_needed = True
         elif v < settings['LowVoltageThresholdPerBattery']:
@@ -2207,8 +2208,7 @@ def check_for_issues(voltages, temps_alerts, settings):
             alert = f"Bank {i}: Low voltage ({v:.2f}V)."
             alerts.append(alert)
             event_log.append(f"{time.strftime('%Y-%m-%d %H:%M:%S')}: {alert}")
-            if len(event_log) > settings.get('EventLogSize', 20):
-                event_log.pop(0)
+
             logging.warning(f"Low voltage alert on Bank {i}: {v:.2f}V.")
             alert_needed = True
     # Add temp alerts.
@@ -2269,8 +2269,6 @@ def balance_battery_voltages(stdscr, high, low, settings, temps_alerts, is_heati
     logging.info(f"Starting {mode} balance from Bank {high} to {low}.")
     # Log event.
     event_log.append(f"{time.strftime('%Y-%m-%d %H:%M:%S')}: {mode} balancing started from Bank {high} to {low}")
-    if len(event_log) > settings.get('EventLogSize', 20):
-        event_log.pop(0)
     # Set flags.
     balancing_active = True
     web_data['balancing'] = True
@@ -2450,8 +2448,6 @@ def balance_battery_voltages(stdscr, high, low, settings, temps_alerts, is_heati
                         f"Absolute: High {high_change:+.3f}V, Low {low_change:+.3f}V). "
                         f"Possible relay or DC-DC converter failure.")
                 event_log.append(f"{time.strftime('%Y-%m-%d %H:%M:%S')}: {alert}")
-                if len(event_log) > settings.get('EventLogSize', 20):
-                    event_log.pop(0)
                 logging.error(alert)
                 balancer_failed = True
                 balancer_failed_time = time.time()
@@ -2477,8 +2473,7 @@ def balance_battery_voltages(stdscr, high, low, settings, temps_alerts, is_heati
                     f"Will NOT set balancer_failed.")
             logging.warning(alert)
             event_log.append(f"{time.strftime('%Y-%m-%d %H:%M:%S')}: {alert}")
-            if len(event_log) > settings.get('EventLogSize', 20):
-                event_log.pop(0)
+
         else:
             alert = (f"Balancing failed from Bank {high} to {low}: "
                     f"Differential did not narrow enough "
@@ -2487,8 +2482,7 @@ def balance_battery_voltages(stdscr, high, low, settings, temps_alerts, is_heati
                     f"Absolute: High {high_change:+.3f}V, Low {low_change:+.3f}V). "
                     f"Possible relay or DC-DC converter failure.")
             event_log.append(f"{time.strftime('%Y-%m-%d %H:%M:%S')}: {alert}")
-            if len(event_log) > settings.get('EventLogSize', 20):
-                event_log.pop(0)
+
             logging.error(alert)
             balancer_failed = True
             balancer_failed_time = time.time()
@@ -2499,8 +2493,6 @@ def balance_battery_voltages(stdscr, high, low, settings, temps_alerts, is_heati
     # Log end.
     logging.info(f"{mode} balancing process completed.")
     event_log.append(f"{time.strftime('%Y-%m-%d %H:%M:%S')}: {mode} balancing completed from Bank {high} to {low}")
-    if len(event_log) > settings.get('EventLogSize', 20):
-        event_log.pop(0)
 
 def compute_bank_medians(calibrated_temps, valid_min):
     """
@@ -3023,7 +3015,7 @@ def draw_tui(stdscr, voltages, calibrated_temps, raw_temps, offsets, bank_stats,
             logging.warning("addstr error for event history header.")
     y_offset += 1
     # Last 20 events.
-    for event in event_log[-20:]:
+    for event in event_log:
         if y_offset >= height:
             break
         max_len = max(1, width - right_half_x - 1)
@@ -3180,10 +3172,11 @@ def startup_self_test(settings, stdscr, data_dir):
     while retries < max_retries:
         # Log attempt.
         logging.info(f"Starting self-test attempt {retries + 1}")
-        # Reset balancer_failed at start of each attempt so previous failures dont persist
+        # Reset balancer state at start of each attempt so previous failures dont persist
         balancer_failed = False
         balancer_failed_time = None
         balancer_fail_reason = ""
+        balancer_fail_count = 0
         # Alerts for this run.
         alerts = []
         # Clear screen.
@@ -3251,8 +3244,7 @@ def startup_self_test(settings, stdscr, data_dir):
             alert = f"I2C connectivity failure: {str(e)}"
             alerts.append(alert)
             event_log.append(f"{time.strftime('%Y-%m-%d %H:%M:%S')}: {alert}")
-            if len(event_log) > settings.get('EventLogSize', 20):
-                event_log.pop(0)
+
             logging.error(f"I2C connectivity failure: {str(e)}. Bus={settings['I2C_BusNumber']}, "
                           f"Multiplexer=0x{settings['MultiplexerAddress']:02x}, "
                           f"VoltageMeter=0x{settings['VoltageMeterAddress']:02x}")
@@ -3281,8 +3273,6 @@ def startup_self_test(settings, stdscr, data_dir):
                 alert = f"Modbus Slave {addr} test failure: {str(e)}"
                 alerts.append(alert)
                 event_log.append(f"{time.strftime('%Y-%m-%d %H:%M:%S')}: {alert}")
-                if len(event_log) > settings.get('EventLogSize', 20):
-                    event_log.pop(0)
                 logging.error(f"Modbus Slave {addr} test failure: {str(e)}. Connection={settings['ip']}:{port_for_slave}, "
                               f"num_channels=1, query_delay={settings['query_delay']}, scaling_factor={settings['scaling_factor']}")
                 if y_test < stdscr.getmaxyx()[0]:
@@ -3316,8 +3306,6 @@ def startup_self_test(settings, stdscr, data_dir):
                 alert = f"Initial temp read failure for slave {addr}: {initial_temps}"
                 alerts.append(alert)
                 event_log.append(f"{time.strftime('%Y-%m-%d %H:%M:%S')}: {alert}")
-                if len(event_log) > settings.get('EventLogSize', 20):
-                    event_log.pop(0)
                 logging.error(f"Initial temperature read failure for slave {addr}: {initial_temps}")
                 all_initial_temps.extend([settings['valid_min']] * settings['sensors_per_battery'])
                 temp_fail = True
@@ -3347,8 +3335,7 @@ def startup_self_test(settings, stdscr, data_dir):
             alert = "Initial voltage read failure: Zero voltage on one or more banks."
             alerts.append(alert)
             event_log.append(f"{time.strftime('%Y-%m-%d %H:%M:%S')}: {alert}")
-            if len(event_log) > settings.get('EventLogSize', 20):
-                event_log.pop(0)
+
             logging.error(f"Initial voltage read failure: Voltages={initial_voltages}")
             if y + 2 < stdscr.getmaxyx()[0]:
                 try:
@@ -3448,8 +3435,6 @@ def startup_self_test(settings, stdscr, data_dir):
                 if temp_anomaly:
                     warning = f"Skipping balance test from Bank {source} to Bank {dest}: Temp anomalies."
                     event_log.append(f"{time.strftime('%Y-%m-%d %H:%M:%S')}: {warning}")
-                    if len(event_log) > settings.get('EventLogSize', 20):
-                        event_log.pop(0)
                     logging.warning(f"Skipping balance test from Bank {source} to Bank {dest}: Temperature anomalies detected.")
                     if y + 1 < stdscr.getmaxyx()[0]:
                         try:
@@ -3474,8 +3459,6 @@ def startup_self_test(settings, stdscr, data_dir):
                     # Log as warning, NOT as failure - DC-DC just can't operate at this voltage
                     warning = f"Skipped: Bank {source} voltage {initial_source_v:.2f}V < {min_src_voltage:.1f}V minimum (DC-DC won't start)."
                     event_log.append(f"{time.strftime('%Y-%m-%d %H:%M:%S')}: Skipped balance test from Bank {source} to Bank {dest}: Source voltage {initial_source_v:.2f}V < {min_src_voltage:.1f}V.")
-                    if len(event_log) > settings.get('EventLogSize', 20):
-                        event_log.pop(0)
                     logging.warning(f"Skipping balance test from Bank {source} to Bank {dest}: Source voltage too low ({initial_source_v:.2f}V < {min_src_voltage:.1f}V)")
                     if y + 1 < stdscr.getmaxyx()[0]:
                         try:
@@ -3494,8 +3477,6 @@ def startup_self_test(settings, stdscr, data_dir):
                         % (source, dest, abs(initial_source_v - initial_dest_v), _min_diff)
                     )
                     event_log.append(time.strftime('%Y-%m-%d %H:%M:%S') + ': ' + _skip_msg)
-                    if len(event_log) > settings.get('EventLogSize', 20):
-                        event_log.pop(0)
                     logging.info(_skip_msg)
                     if y + 1 < stdscr.getmaxyx()[0]:
                         try:
@@ -3514,19 +3495,20 @@ def startup_self_test(settings, stdscr, data_dir):
                 start_time = time.time()
                 source_trend = [initial_source_v]
                 dest_trend = [initial_dest_v]
+                final_source_v = initial_source_v
+                final_dest_v = initial_dest_v
                 progress_y = y + 1
-                # Loop for duration.
-                while time.time() - start_time < test_duration:
-                    time.sleep(read_interval)
-                    source_v = read_voltage_with_retry(source, settings)[0] or 0.0
-                    dest_v = read_voltage_with_retry(dest, settings)[0] or 0.0
-                    source_trend.append(source_v)
-                    dest_trend.append(dest_v)
-                    elapsed = time.time() - start_time
-                    if elapsed + read_interval >= test_duration:
+                # Loop for duration with guaranteed hardware shutdown.
+                try:
+                    while time.time() - start_time < test_duration:
+                        time.sleep(read_interval)
+                        source_v = read_voltage_with_retry(source, settings)[0] or 0.0
+                        dest_v = read_voltage_with_retry(dest, settings)[0] or 0.0
+                        source_trend.append(source_v)
+                        dest_trend.append(dest_v)
                         final_source_v = source_v
                         final_dest_v = dest_v
-                        # Display progress BEFORE turning off converter
+                        elapsed = time.time() - start_time
                         if progress_y < stdscr.getmaxyx()[0]:
                             try:
                                 stdscr.addstr(progress_y, 0, " " * 80, curses.color_pair(6))
@@ -3534,20 +3516,11 @@ def startup_self_test(settings, stdscr, data_dir):
                             except curses.error:
                                 logging.warning("addstr error in startup balance progress.")
                         stdscr.refresh()
-                        logging.debug(f"Balance test from Bank {source} to Bank {dest}: Final - Bank {source}={final_source_v:.2f}V, Bank {dest}={final_dest_v:.2f}V")
-                        # Now turn off converter and relays
-                        control_dcdc_converter(False, settings)
-                        time.sleep(0.5)  # Allow relays to settle
-                        set_relay_connection(0, 0, settings)
-                    else:
                         logging.debug(f"Balance test from Bank {source} to Bank {dest}: Bank {source}={source_v:.2f}V, Bank {dest}={dest_v:.2f}V")
-                        if progress_y < stdscr.getmaxyx()[0]:
-                            try:
-                                stdscr.addstr(progress_y, 0, " " * 80, curses.color_pair(6))
-                                stdscr.addstr(progress_y, 0, f"Progress: {elapsed:.1f}s, Bank {source} {source_v:.2f}V, Bank {dest} {dest_v:.2f}V", curses.color_pair(6))
-                            except curses.error:
-                                logging.warning("addstr error in startup balance progress.")
-                        stdscr.refresh()
+                finally:
+                    control_dcdc_converter(False, settings)
+                    time.sleep(0.5)  # Allow relays to settle
+                    set_relay_connection(0, 0, settings)
                 
                 if progress_y + 1 < stdscr.getmaxyx()[0]:
                     try:
@@ -3603,8 +3576,6 @@ def startup_self_test(settings, stdscr, data_dir):
                                     f"NOT marking as failed.")
                             alerts.append(alert)
                             event_log.append(f"{time.strftime('%Y-%m-%d %H:%M:%S')}: {alert}")
-                            if len(event_log) > settings.get('EventLogSize', 20):
-                                event_log.pop(0)
                             logging.warning(alert)
                             if progress_y + 1 < stdscr.getmaxyx()[0]:
                                 try:
@@ -3620,8 +3591,6 @@ def startup_self_test(settings, stdscr, data_dir):
                                     f"Possible relay failure.")
                             alerts.append(alert)
                             event_log.append(f"{time.strftime('%Y-%m-%d %H:%M:%S')}: {alert}")
-                            if len(event_log) > settings.get('EventLogSize', 20):
-                                event_log.pop(0)
                             logging.error(alert)
                             balancer_failed = True
                             balancer_failed_time = time.time()
@@ -3644,8 +3613,6 @@ def startup_self_test(settings, stdscr, data_dir):
                     alert = f"Balance test from Bank {source} to Bank {dest} failed: Insufficient readings."
                     alerts.append(alert)
                     event_log.append(f"{time.strftime('%Y-%m-%d %H:%M:%S')}: {alert}")
-                    if len(event_log) > settings.get('EventLogSize', 20):
-                        event_log.pop(0)
                     logging.error(f"Balance test from Bank {source} to Bank {dest} failed: Only {len(source_trend)} readings collected.")
                     balancer_failed = True
                     balancer_failed_time = time.time()
@@ -4002,8 +3969,8 @@ def write_registers_to_datastore(context, registers):
         
         # Write each register value
         for addr, value in registers.items():
-            # Clamp value to valid 16-bit unsigned range
-            value = max(0, min(65535, int(value)))
+            # Convert to valid 16-bit unsigned range (two's complement for signed values)
+            value = int(value) & 0xFFFF
             slave.setValues(3, addr, [value])  # 3 = holding registers
     except Exception as e:
         logging.error(f"Error writing to Modbus datastore: {e}")
@@ -5266,15 +5233,19 @@ def main(stdscr):
     curses.init_pair(9, curses.COLOR_WHITE, -1)     # Spare
     stdscr.nodelay(True)
     # Globals.
-    global previous_temps, previous_bank_medians, run_count, startup_offsets, startup_median, startup_set, battery_voltages, web_data, balancing_active, BANK_SENSOR_INDICES, alive_timestamp, NUM_BANKS, balancer_failed, balancer_failed_time, balancer_fail_count, balancer_fail_reason, comm_stats, REASONABLE_TEMP_MIN, REASONABLE_TEMP_MAX, CONSECUTIVE_FAILURE_THRESHOLD
+    global previous_temps, previous_bank_medians, run_count, startup_offsets, startup_median, startup_set, battery_voltages, web_data, balancing_active, BANK_SENSOR_INDICES, alive_timestamp, NUM_BANKS, balancer_failed, balancer_failed_time, balancer_fail_count, balancer_fail_reason, comm_stats, REASONABLE_TEMP_MIN, REASONABLE_TEMP_MAX, CONSECUTIVE_FAILURE_THRESHOLD, cerbo_integration_enabled
     # Load and validate config.
     settings = load_config(data_dir)
     settings['data_dir'] = data_dir  # Store for use by API handlers
     validate_config(settings)
     # Set config-based globals
-    global REASONABLE_TEMP_MIN, REASONABLE_TEMP_MAX, CONSECUTIVE_FAILURE_THRESHOLD
+    global REASONABLE_TEMP_MIN, REASONABLE_TEMP_MAX, CONSECUTIVE_FAILURE_THRESHOLD, event_log
     REASONABLE_TEMP_MIN = settings.get('reasonable_temp_min', -10.0)
     REASONABLE_TEMP_MAX = settings.get('reasonable_temp_max', 60.0)
+    # Resize event_log deque if EventLogSize differs from default
+    _event_log_size = settings.get('EventLogSize', 20)
+    if event_log.maxlen != _event_log_size:
+        event_log = deque(event_log, maxlen=_event_log_size)
     CONSECUTIVE_FAILURE_THRESHOLD = settings.get('consecutive_failure_threshold', 5)
     # Set banks.
     NUM_BANKS = settings['num_series_banks'] # Dynamic now.
@@ -5442,8 +5413,6 @@ def main(stdscr):
             if not any("Cabinet over temp" in a for a in temps_alerts):
                 temps_alerts.append(f"Cabinet over temp: {overall_median:.1f}°C > {settings['cabinet_over_temp_threshold']}°C. Fan on.")
                 event_log.append(f"{time.strftime('%Y-%m-%d %H:%M:%S')}: Cabinet over temp: {overall_median:.1f}°C > {settings['cabinet_over_temp_threshold']}°C. Fan on.")
-                if len(event_log) > settings.get('EventLogSize', 20):
-                    event_log.pop(0)
         else:
             if GPIO:
                 GPIO.output(settings['FanRelayPin'], GPIO.LOW)
@@ -5481,8 +5450,6 @@ def main(stdscr):
                     logging.error(f"Balancer permanently disabled: {balancer_fail_count} consecutive failures. "
                                  f"Restart BMS to re-enable. Last: {balancer_fail_reason}")
                     event_log.append(f"{time.strftime('%Y-%m-%d %H:%M:%S')}: Balancer disabled after {balancer_fail_count} failures - restart required")
-                    if len(event_log) > settings.get('EventLogSize', 20):
-                        event_log.pop(0)
                     send_alert_email(f"Balancer permanently disabled after {balancer_fail_count} consecutive failures.\n"
                                    f"Last reason: {balancer_fail_reason}\n"
                                    f"Restart BMS to re-enable balancing.", settings)
@@ -5495,8 +5462,6 @@ def main(stdscr):
                                   f"(fail_count={balancer_fail_count}/{max_consecutive_failures}, cooldown was {cooldown}s). "
                                   f"Will retry balancing on next cycle.")
                     event_log.append(f"{time.strftime('%Y-%m-%d %H:%M:%S')}: Auto-recovery: balancer reset after {cooldown}s cooldown (failures: {balancer_fail_count}/{max_consecutive_failures})")
-                    if len(event_log) > settings.get('EventLogSize', 20):
-                        event_log.pop(0)
                     balancer_failed = False
                     balancer_failed_time = None
                     balancer_fail_reason = ""

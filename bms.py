@@ -639,6 +639,7 @@ def read_cerbo_dc_voltage(cerbo_ip, cache_ttl=30.0):
     now = time.time()
     if now - _cerbo_dc_cache['ts'] < cache_ttl:
         return _cerbo_dc_cache['v']  # negative caching: return None within TTL if last attempt failed
+    s = None
     try:
         req = struct.pack(">HHHBBHH", 1, 0, 6, 227, 3, 26, 1)
         s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -652,7 +653,6 @@ def read_cerbo_dc_voltage(cerbo_ip, cache_ttl=30.0):
             if not chunk:
                 break
             resp += chunk
-        s.close()
         _cerbo_dc_cache['reachable'] = True  # TCP connected: Cerbo is up even if voltage out of range
         if len(resp) >= 11 and not (resp[7] & 0x80):
             volts = struct.unpack(">H", resp[9:11])[0] * 0.01
@@ -662,6 +662,12 @@ def read_cerbo_dc_voltage(cerbo_ip, cache_ttl=30.0):
                 return volts
     except Exception:
         _cerbo_dc_cache['reachable'] = False  # TCP failed: Cerbo genuinely unreachable
+    finally:
+        if s is not None:
+            try:
+                s.close()
+            except Exception:
+                pass
     _cerbo_dc_cache['v'] = None  # negative cache: failed attempt, wait cache_ttl before retry
     _cerbo_dc_cache['ts'] = now
     return None
@@ -680,6 +686,7 @@ def write_cerbo_dvcc_direct(cerbo_ip, cvl_volts, max_charge_a):
     Returns True on success.
     """
     global _cerbo_dvcc_write_cache
+    s = None
     try:
         s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         s.settimeout(1.0)
@@ -692,11 +699,16 @@ def write_cerbo_dvcc_direct(cerbo_ip, cvl_volts, max_charge_a):
 
         _write_reg(100, 2710, round(cvl_volts * 10))  # MaxChargeVoltage (volts × 10)
         _write_reg(100, 2705, int(max_charge_a))       # MaxChargeCurrent (amps)
-        s.close()
         return True
     except Exception as e:
         logging.debug(f'Cerbo DVCC direct write failed: {e}')
         return False
+    finally:
+        if s is not None:
+            try:
+                s.close()
+            except Exception:
+                pass
 
 
 def test_modbus_connectivity(ip, port):
@@ -712,14 +724,20 @@ def test_modbus_connectivity(ip, port):
     Returns:
         bool: True if connection succeeds, False otherwise.
     """
+    s = None
     try:
         s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         s.settimeout(1)  # 1 second timeout
         s.connect((ip, port))
-        s.close()
         return True
     except socket.error:
         return False
+    finally:
+        if s is not None:
+            try:
+                s.close()
+            except Exception:
+                pass
 
 def read_ntc_sensors(ip, modbus_port, query_delay, num_channels, scaling_factor, max_retries, retry_backoff_base, slave_addr=1, slave_ports=None, slave_addresses=None, slave_ips=None):
     """
@@ -2287,8 +2305,8 @@ def balance_battery_voltages(stdscr, high, low, settings, temps_alerts, is_heati
         height, width = stdscr.getmaxyx()
         right_half_x = width // 2
         progress_y = 1
-        high_trend = [voltage_high]
-        low_trend = [voltage_low]
+        high_trend = []
+        low_trend = []
         # Read interval during balance (reuse startup).
         read_interval = settings['test_read_interval'] # Reuse from startup
         last_read = time.time()
@@ -2383,6 +2401,11 @@ def balance_battery_voltages(stdscr, high, low, settings, temps_alerts, is_heati
     # that shift all bank voltages together as a common-mode signal.
     # The DC-DC converter creates a differential signal (lowers source, raises dest),
     # so checking gap reduction cancels out common-mode effects.
+    #
+    # Charge-state awareness: During high-current charging or discharging, banks at
+    # different SOCs experience unequal voltage shifts that can mask or invert the
+    # balancer's effect. In these states, accept any gap narrowing as success and only
+    # flag failure if the gap widens dramatically (indicating real hardware fault).
     if len(high_trend) >= 3 and len(low_trend) >= 3:
         high_change = avg_high_v - initial_high_v
         low_change = avg_low_v - initial_low_v
@@ -2397,13 +2420,49 @@ def balance_battery_voltages(stdscr, high, low, settings, temps_alerts, is_heati
         diff_reduction = initial_diff - avg_diff          # positive = gap narrowed
         discrete_diff_reduction = initial_diff - discrete_diff
 
+        # Check charge state for context-aware thresholds
+        charge_state = settings.get('_charge_state', 'Idle')
+        high_current = charge_state in ('Bulk', 'Absorption', 'Discharging')
+
         logging.info(f"Balance verification: initial diff={initial_diff:.3f}V, "
                     f"avg diff={avg_diff:.3f}V, discrete diff={discrete_diff:.3f}V | "
                     f"reduction: avg={diff_reduction:+.3f}V, discrete={discrete_diff_reduction:+.3f}V | "
                     f"absolute: High {high_change:+.3f}V, Low {low_change:+.3f}V | "
-                    f"threshold={min_delta}V")
+                    f"threshold={min_delta}V, charge_state={charge_state}")
 
-        if diff_reduction >= min_delta:
+        if high_current:
+            # During high current flow, voltage readings are dominated by IR drops and
+            # unequal charging rates across banks at different SOCs. The balancer's small
+            # differential signal is unreliable to measure.
+            if diff_reduction > 0 or discrete_diff_reduction > 0:
+                # Gap narrowed at all - balancer is working
+                logging.info(f"Balancing verified (high-current, {charge_state}): gap narrowed "
+                            f"{diff_reduction:+.3f}V (discrete {discrete_diff_reduction:+.3f}V).")
+                if balancer_fail_count > 0:
+                    logging.info(f"Balancer recovery: successful after {balancer_fail_count} consecutive failure(s).")
+                    balancer_fail_count = 0
+            elif diff_reduction < -0.15:
+                # Gap widened by >0.15V - genuine hardware fault even during charging
+                alert = (f"Balancing failed from Bank {high} to {low}: "
+                        f"Gap widened significantly during {charge_state} "
+                        f"(initial gap: {initial_diff:.3f}V, avg gap: {avg_diff:.3f}V, "
+                        f"reduction: {diff_reduction:+.3f}V | "
+                        f"Absolute: High {high_change:+.3f}V, Low {low_change:+.3f}V). "
+                        f"Possible relay or DC-DC converter failure.")
+                event_log.append(f"{time.strftime('%Y-%m-%d %H:%M:%S')}: {alert}")
+                if len(event_log) > settings.get('EventLogSize', 20):
+                    event_log.pop(0)
+                logging.error(alert)
+                balancer_failed = True
+                balancer_failed_time = time.time()
+                balancer_fail_count += 1
+                balancer_fail_reason = alert
+            else:
+                # Gap didn't narrow but didn't widen dramatically - inconclusive
+                logging.info(f"Balancing inconclusive during {charge_state} from Bank {high} to {low}: "
+                            f"diff_reduction={diff_reduction:+.3f}V (threshold relaxed during high current). "
+                            f"Will NOT set balancer_failed.")
+        elif diff_reduction >= min_delta:
             # Gap narrowed by at least min_delta - balancing worked
             logging.info(f"Balancing verified (differential): gap narrowed {diff_reduction:+.3f}V "
                         f"({initial_diff:.3f}V -> {avg_diff:.3f}V).")
@@ -2894,13 +2953,12 @@ def draw_tui(stdscr, voltages, calibrated_temps, raw_temps, offsets, bank_stats,
     y_offset += 1
     if alerts:
         for alert in alerts:
-            if y_offset < height and len(alert) < right_half_x:
+            if y_offset < height:
+                display_alert = alert[:right_half_x - 1] if len(alert) >= right_half_x else alert
                 try:
-                    stdscr.addstr(y_offset, 0, alert, curses.color_pair(8))
+                    stdscr.addstr(y_offset, 0, display_alert, curses.color_pair(8))
                 except curses.error:
-                    logging.warning(f"addstr error for alert '{alert}'.")
-            else:
-                logging.warning(f"Skipping alert '{alert}' - out of bounds.")
+                    pass  # silently skip display errors - don't spam log
             y_offset += 1
     else:
         if y_offset < height:

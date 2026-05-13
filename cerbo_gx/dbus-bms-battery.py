@@ -24,7 +24,7 @@ from vedbus import VeDbusService
 from pymodbus.client.sync import ModbusTcpClient
 
 # ── Configuration ─────────────────────────────────────────────────────────────
-BMS_HOST             = '192.168.15.137'
+BMS_HOST             = '192.168.15.72'
 BMS_PORT             = 502
 BMS_UNIT_ID          = 1
 POLL_INTERVAL_MS     = 2000

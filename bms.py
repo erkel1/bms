@@ -3744,14 +3744,6 @@ def create_modbus_datastore(num_banks):
     # uninitialised zeros and blocks charging/discharging on boot.
     slave_context.setValues(3, 330, [1, 1])
 
-    # Carlo Gavazzi EM24 identification registers
-    # reg 0x000b (11) = model 1648 → Cerbo detects us as EM24DINAV23XE1X
-    slave_context.setValues(3, 11, [1648])
-    # reg 0xa000 (40960) = 7  → application H (Carlo Gavazzi driver checks this)
-    slave_context.setValues(3, 40960, [7])
-    # reg 0x1002 (4098) = 4  → 3-phase ("3P") config
-    slave_context.setValues(3, 4098, [4])
-
     return context
 
 def update_modbus_registers(settings):
@@ -3849,24 +3841,8 @@ def update_modbus_registers(settings):
     registers[1291] = int(max_voltage * 100)
 
     # =========================================================================
-    # Carlo Gavazzi EM24 phase voltage registers (regs 0-5)
-    # Cerbo reads these as L1/L2/L3 AC voltages; we map Bank 1/2/3 DC voltages.
-    # Format: s32l (signed 32-bit little-endian), scale x10 (20.1V -> 201)
-    #   reg 0 = L1 low word, reg 1 = L1 high word
-    #   reg 2 = L2 low word, reg 3 = L2 high word
-    #   reg 4 = L3 low word, reg 5 = L3 high word
-    # =========================================================================
-    for i, bv in enumerate(voltages[:3]):
-        v = int(round(bv * 10))
-        registers[i * 2]     = v & 0xFFFF
-        registers[i * 2 + 1] = (v >> 16) & 0xFFFF
-
-    # =========================================================================
     # Pylontech-compatible registers (addresses the Cerbo GX actually reads)
     # =========================================================================
-
-    # NOTE: reg 11 is now the Carlo Gavazzi probe ID (1648) - do NOT overwrite
-    # NOTE: reg 4 is now L3 bank voltage low word - do NOT overwrite
 
     # Register 768-771: Solar charger compatible registers
     registers[768] = int(total_voltage * 100)  # Battery voltage centivolts

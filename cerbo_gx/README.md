@@ -9,7 +9,7 @@ Additionally, the Pi's bms.py Modbus TCP server emulates a Carlo Gavazzi EM24 en
 ## Architecture
 
 ```
-BMS Pi (192.168.15.137)                     Cerbo GX (192.168.15.182)
+BMS Pi (192.168.15.137)                     Cerbo GX (192.168.15.178)
 ┌────────────────────────────┐             ┌──────────────────────────────────────┐
 │  bms.py                    │  Modbus TCP │                                      │
 │  ├─ Reads temps/voltages   │  writes ──► │  Settings/SystemSetup/               │
@@ -97,7 +97,7 @@ A Node-RED flow on the Cerbo polls the Pi's `/api/status` endpoint every 5 secon
 
 **Flow file:** `/cerbo/node-red-bms-flow.json` in this repo (also at `/tmp/bms_flow.json` on Cerbo while running).
 
-Node-RED UI: `https://192.168.15.182:1881/`
+Node-RED UI: `https://192.168.15.178:1881/`
 
 ### Critical Node-RED gotchas
 
@@ -119,15 +119,15 @@ After any Cerbo firmware reflash, perform these steps:
 
 3. **Rename Bank Voltages EM24 device**:
    ```bash
-   ssh root@192.168.15.182 'dbus -y com.victronenergy.settings /Settings/Devices/cg_/CustomName SetValue Bank Voltages'
+   ssh root@192.168.15.178 'dbus -y com.victronenergy.settings /Settings/Devices/cg_/CustomName SetValue Bank Voltages'
    ```
 
 4. **Enable Node-RED**: Settings → Services → Node-RED
 
 5. **Redeploy the Node-RED flow** (copy flow file to Cerbo first):
    ```bash
-   scp /projects/battery_balancer/cerbo/node-red-bms-flow.json root@192.168.15.182:/tmp/bms_flow.json
-   curl -sk -o /dev/null -w %{http_code} -X POST https://192.168.15.182:1881/flows \
+   scp /projects/battery_balancer/cerbo/node-red-bms-flow.json root@192.168.15.178:/tmp/bms_flow.json
+   curl -sk -o /dev/null -w %{http_code} -X POST https://192.168.15.178:1881/flows \
      -H Content-Type: application/json \
      -H Node-RED-Deployment-Type: full \
      -d @/tmp/bms_flow.json
@@ -146,6 +146,6 @@ No code installation on the Cerbo is needed.
 
 ## Cerbo GX Info
 
-- **IP**: 192.168.15.182 (DHCP — may change after reflash)
+- **IP**: 192.168.15.178 (DHCP — may change after reflash)
 - **Password**: 555555
 - **Venus OS**: Large image (required for Node-RED), v6.12.23-venus-8

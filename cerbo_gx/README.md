@@ -2,150 +2,188 @@
 
 ## Overview
 
-The Cerbo GX is integrated via **direct Modbus TCP writes from the Pi** — no custom driver runs on the Cerbo. The Pi pushes DVCC charge limits directly to the Cerbo's built-in Modbus TCP server every 30 seconds.
+The Cerbo GX is integrated via **two parallel mechanisms**:
 
-Additionally, the Pi's bms.py Modbus TCP server emulates a Carlo Gavazzi EM24 energy meter so the Cerbo can display individual bank voltages. A Node-RED flow on the Cerbo publishes a virtual battery service with BMS data on Venus OS D-Bus.
+1. **A "thin driver" on the Cerbo** (`dbus-bms-battery.py`) that polls the Pi's Modbus TCP server every 2 s and republishes pack state to D-Bus as a virtual battery service. This is how the Cerbo *sees* the pack — voltage, per-bank voltages, temperatures, alarms, AllowToCharge/Discharge.
+2. **Direct Modbus TCP writes from the Pi to the Cerbo** that push DVCC charge limits into the Cerbo's settings service. This is how the Pi *controls* the charger.
+
+The driver is intentionally dumb — all resilience logic (reconnect, staleness detection, safe fallbacks on Pi failure) lives on the Pi side. The Cerbo driver just translates Modbus reads into D-Bus path writes.
 
 ## Architecture
 
 ```
-BMS Pi (192.168.15.137)                     Cerbo GX (192.168.15.203)
-┌────────────────────────────┐             ┌──────────────────────────────────────┐
-│  bms.py                    │  Modbus TCP │                                      │
-│  ├─ Reads temps/voltages   │  writes ──► │  Settings/SystemSetup/               │
-│  ├─ Manages balancing      │  reg 2710   │    MaxChargeVoltage  ──► DVCC ──► MPPT│
-│  ├─ write_cerbo_dvcc_direct│  reg 2705   │    MaxChargeCurrent  ──► DVCC        │
-│  │   (every 30s)           │             │                                      │
-│  └─ Modbus TCP server      │  Modbus TCP │  dbus-modbus-client polls Pi:        │
-│      port 502, unit 1      │  polls ◄─── │    EM24 regs 0–5 (bank voltages)     │
-│      (EM24 emulation)      │             │    shown as "Bank Voltages" (grid)    │
-│                            │             │                                      │
-│  /api/status HTTP          │  HTTP poll  │  Node-RED (Venus OS Large):          │
-│    (port 8080)             │  ◄─────────  │    polls /api/status every 5s        │
-└────────────────────────────┘             │    virtual battery D-Bus service      │
-                                           │    com.victronenergy.battery          │
-                                           │      .virtual_vv_bat (instance 100)  │
-                                           │                                      │
-                                           │  SmartShunt (ttyUSB0) = active       │
-                                           │    battery monitor (SOC/current)     │
-                                           └──────────────────────────────────────┘
+BMS Pi (192.168.15.202)                       Cerbo GX (192.168.15.203)
+┌───────────────────────────────┐             ┌──────────────────────────────────────────┐
+│  bms.py                       │             │                                          │
+│  ├─ Temp+voltage poll loop    │             │  /service/dbus-bms-battery               │
+│  ├─ Balancer + DVCC logic     │             │   ├─ dbus-bms-battery.py (v2.2)          │
+│  │                            │  Modbus TCP │   ├─ Polls Pi every 2s                   │
+│  ├─ Modbus TCP server         │  port 502   │   ├─ Reads regs 259, 262, 305-331,       │
+│  │   port 502, single=True    │  ◄────────  │   │     1282, 1286-1291, 1306+, 318-328  │
+│  │   (exposes pack state)     │   reads     │   └─ Publishes com.victronenergy.battery │
+│  │                            │             │         .modbus_tcp_bms (instance 1)     │
+│  ├─ write_cerbo_dvcc_direct() │             │                                          │
+│  │   (raw socket Modbus TCP)  │  Modbus TCP │  com.victronenergy.settings (unit 100)   │
+│  │   rate-limited ≥30s        │  writes ──► │   ├─ Settings/SystemSetup/MaxChargeV     │
+│  │                            │   regs      │   └─ Settings/SystemSetup/MaxChargeI     │
+│  │                            │  2710,2705  │           │                              │
+│  │                            │  unit 100   │           ▼                              │
+│  │                            │             │   DVCC ──► MultiPlus / MPPT              │
+│  │                            │             │                                          │
+│  └─ read_cerbo_dc_voltage()   │  Modbus TCP │  com.victronenergy.vebus (unit 227)      │
+│      (charge-state detection, │  reads ◄──  │   └─ /Dc/0/Voltage (reg 26)              │
+│       cable-drop comp)        │   reg 26    │                                          │
+│                               │  unit 227   │  SmartShunt (ttyS7) = battery monitor    │
+└───────────────────────────────┘             │   (SoC, current — set in Settings →      │
+                                              │    System Setup → Battery monitor)       │
+                                              └──────────────────────────────────────────┘
 ```
 
-## DVCC Integration (Direct Modbus TCP Writes)
+## The Thin Driver (`dbus-bms-battery.py`)
 
-The Pi calls `write_cerbo_dvcc_direct()` every 30 seconds (or immediately on significant change) to write charge limits directly to the Cerbo settings:
+**On the Cerbo:**
+- Lives at `/data/dbus-bms-battery/dbus-bms-battery.py`
+- Supervised by runit at `/service/dbus-bms-battery`
+- Logs to `/var/log/dbus-bms-battery/current` (multilog with timestamps)
+- D-Bus service: `com.victronenergy.battery.modbus_tcp_bms`, device instance 1
+
+**Pi config in the driver** (top of file):
+```python
+BMS_HOST             = '192.168.15.202'
+BMS_PORT             = 502
+BMS_UNIT_ID          = 1
+POLL_INTERVAL_MS     = 2000      # GLib timeout
+HARD_DISCONNECT_S    = 1800      # 30 min silence threshold
+RECONNECT_READS      = 5         # successful reads required to flip Connected back to 1
+```
+
+**What it pulls from the Pi each poll** (in order):
+
+| Register | Count | Function | Sample D-Bus path |
+|---|---|---|---|
+| 259 | 16 | Pack voltage, data-valid flag, temperature, alarms | `/Dc/0/Voltage`, `/Dc/0/Temperature`, `/Alarms/*` |
+| 305 | 27 | DVCC limits + AllowToCharge/Discharge | `/Info/MaxChargeVoltage`, `/Io/AllowToCharge` |
+| 1282 | 1 | State (9 = Running, 10 = Error, 14 = Standby) | `/State` |
+| 1286 | 6 | Topology + bank min/max voltage | `/System/NrOfBatteries`, `/System/Min/MaxCellVoltage` |
+| 1306 | 3 | Per-bank voltages | `/Voltages/Cell1`..`Cell3`, `/Voltages/Sum`, `/Voltages/Diff` |
+| 318 | 5 | Temperature min/max + per-bank median | `/System/Min/MaxCellTemperature`, `/Temperatures/Cell1`..`Cell3` |
+
+**Data-valid gate:** register 260 must be 1 before the driver publishes anything. While the Pi is booting (no first poll yet), the driver holds D-Bus values unchanged.
+
+**Reconnect / failure behaviour:**
+- Each poll uses one persistent `ModbusTcpClient` (3 s connect timeout). On any error: `_mod_ok = False`, reconnect on next attempt.
+- Error counter: 30 errors = first log line. 60 errors = next log line. Every 60 thereafter.
+- At ~900 errors (≈30 min): one-shot `_safe_fallback()` writes safe values — `AllowToCharge=1`, `AllowToDischarge=1`, all alarms cleared, `/Connected=0`, **and `/Dc/0/Voltage`/`/Dc/0/Temperature` set to None** (so the Cerbo doesn't continue reporting stale values).
+- Recovery: when reads succeed again, need 5 consecutive good polls before `/Connected` flips back to 1.
+
+## DVCC Direct Writes (Pi → Cerbo)
+
+The Pi sends charge limits directly to the Cerbo's `com.victronenergy.settings` service via Modbus TCP:
 
 | Register | Unit | D-Bus path | Scale | Description |
 |----------|------|------------|-------|-------------|
-| 2710 | 100 | `Settings/SystemSetup/MaxChargeVoltage` | ×10 | e.g. 60.3V → 603 |
-| 2705 | 100 | `Settings/SystemSetup/MaxChargeCurrent` | ×1A | e.g. 200A → 200 |
+| 2710 | 100 | `Settings/SystemSetup/MaxChargeVoltage` | ×10 | e.g. 60.3 V → 603 |
+| 2705 | 100 | `Settings/SystemSetup/MaxChargeCurrent` | ×1 A | e.g. 200 A → 200 |
 
-On a high-voltage alarm, CVL is dropped to 49.5V to immediately stop charging.
+The values come from `bms.py`'s DVCC pipeline (hot derate → cold derate → HV clamp → cable-drop comp). On a high-voltage alarm, CVL is forced to 49.5 V to stop charging.
 
-**Rate limiting:** Writes are throttled to 30s minimum interval. Faster polling (e.g. 5s) caused Venus OS crashes. Do not reduce below 30s.
+**Rate limiting:** Writes only happen if any of:
+- ≥30 s since last write, OR
+- CVL changed by ≥0.05 V, OR
+- HV alarm state flipped
 
-### Prerequisites on Cerbo
+**Don't lower the 30 s minimum** — earlier 5 s polling caused Venus OS crashes.
 
-- **Modbus TCP enabled with write access**: Settings → Services → Modbus TCP → Enable, set to read/write
-
-## Bank Voltage Display (Carlo Gavazzi EM24 Emulation)
-
-`bms.py`'s Modbus TCP server (port 502, unit 1) identifies itself as a Carlo Gavazzi EM24 3-phase energy meter. The Cerbo's `dbus-modbus-client` polls it and shows bank voltages as L1/L2/L3 AC voltages on the dashboard.
-
-The device appears as `com.victronenergy.grid.cg_` on D-Bus, renamed to **Bank Voltages** via:
-```bash
-dbus -y com.victronenergy.settings /Settings/Devices/cg_/CustomName SetValue Bank Voltages
-```
-
-**EM24 register map (Pi's Modbus server, port 502 unit 1):**
-
-| Registers | Type | Value | Description |
-|-----------|------|-------|-------------|
-| 0–1 | s32l ×10 | e.g. 197 = 19.7V | Bank 1 voltage |
-| 2–3 | s32l ×10 | | Bank 2 voltage |
-| 4–5 | s32l ×10 | | Bank 3 voltage |
-| 11 | uint16 | 1648 | Carlo Gavazzi model ID — do NOT overwrite |
-| 4098 | uint16 | 4 | 3-phase configuration |
-| 40960 | uint16 | 7 | Application H — do NOT overwrite |
-
-**To connect the Cerbo to the Pi's EM24 server**, set the Modbus client device spec via MQTT:
-```
-Topic: W/48e7da8a03c5/settings/0/Settings/ModbusClient/tcp/Devices
-Value: {value:tcp:192.168.15.137:502:1}
-```
-Or set it at: Settings → Services → Modbus client.
-
-## Node-RED Virtual Battery (Venus OS Large)
-
-A Node-RED flow on the Cerbo polls the Pi's `/api/status` endpoint every 5 seconds and publishes data to a virtual D-Bus battery service.
-
-**Service:** `com.victronenergy.battery.virtual_vv_bat` (device instance 100)
-
-**Published paths:**
-
-| D-Bus path | Source field | Notes |
-|------------|--------------|-------|
-| `Dc/0/Voltage` | `total_voltage` | Pack voltage |
-| `Dc/0/Temperature` | `temperatures` | Max of all 192 sensor readings |
-| `Info/MaxChargeVoltage` | `charge_voltage` | Active CVL |
-| `Info/MaxChargeCurrent` | `dvcc_max_charge_current` | Temperature-derated limit |
-| `Info/MaxDischargeCurrent` | `dvcc_max_discharge_current` | |
-| `Alarms/HighVoltage` | `alerts` | 2 if high-voltage alert present |
-| `Alarms/LowVoltage` | `alerts` | 2 if low-voltage alert present |
-| `Alarms/HighTemperature` | `alerts` | 2 if high-temp alert present |
-| `Connected` | `system_status` | 1 if `system_status == "Running"` |
-
-**Flow file:** `/cerbo/node-red-bms-flow.json` in this repo (also at `/tmp/bms_flow.json` on Cerbo while running).
-
-Node-RED UI: `https://192.168.15.203:1881/`
-
-### Critical Node-RED gotchas
-
-1. The `victron-virtual` battery node requires `include_battery_temperature: true` in the node config — otherwise the code silently removes `Dc/0/Temperature` from the D-Bus interface, and ALL `setValuesLocally` calls that include temperature throw an exception that blocks all other values from being set.
-2. Send payload directly to the `victron-virtual` node INPUT (not via `victron-output-custom` nodes). Output-custom uses D-Bus `SetValue` per-path which fails for Temperature.
-3. Must include a `victron-client` config node with `id: victron-client-id` (hardcoded lookup) in the flow.
-4. `/api/status` → `alerts` field is a list `[]`, not a dict. `temperatures` is a flat array of all 192 sensor readings.
-
-## After Cerbo Reflash Recovery
-
-After any Cerbo firmware reflash, perform these steps:
-
-1. **Enable Modbus TCP with write access**: Settings → Services → Modbus TCP → Enable (read/write)
-
-2. **Connect Cerbo to Pi's EM24 server** (MQTT or GUI):
-   ```
-   W/48e7da8a03c5/settings/0/Settings/ModbusClient/tcp/Devices = {value:tcp:192.168.15.137:502:1}
-   ```
-
-3. **Rename Bank Voltages EM24 device**:
-   ```bash
-   ssh root@192.168.15.203 'dbus -y com.victronenergy.settings /Settings/Devices/cg_/CustomName SetValue Bank Voltages'
-   ```
-
-4. **Enable Node-RED**: Settings → Services → Node-RED
-
-5. **Redeploy the Node-RED flow** (copy flow file to Cerbo first):
-   ```bash
-   scp /projects/battery_balancer/cerbo/node-red-bms-flow.json root@192.168.15.203:/tmp/bms_flow.json
-   curl -sk -o /dev/null -w %{http_code} -X POST https://192.168.15.203:1881/flows \
-     -H Content-Type: application/json \
-     -H Node-RED-Deployment-Type: full \
-     -d @/tmp/bms_flow.json
-   # Returns 204 on success
-   ```
-
-No code installation on the Cerbo is needed.
+**Prerequisites on Cerbo:** Settings → Services → Modbus TCP → Enable, set to read/write.
 
 ## Files in This Directory
 
 | File | Description |
 |------|-------------|
+| `dbus-bms-battery.py` | The thin driver. Deployed to `/data/dbus-bms-battery/` on the Cerbo |
+| `install_cerbo_driver.sh` | Deploys driver + runit service + GUI mod. Run from Pi |
+| `PageBattery.qml.modified` | Classic GUI QML patched to show all 3 bank voltages |
+| `PageBattery.qml.original` | Pristine Cerbo QML, kept for diff/recovery |
 | `README.md` | This file |
 
-> **Historical note:** Earlier versions of this integration ran a custom `dbus-bms-battery.py` driver directly on the Cerbo GX. That approach was replaced in March 2026 with direct Modbus TCP writes (no Cerbo code required). The old driver files (`dbus-bms-battery.py`, `install_cerbo_driver.sh`, `PageBattery.qml.*`) have been removed.
+## Classic-GUI Cell Voltage Display (QML mod)
+
+`PageBattery.qml.modified` replaces the standard `Voltage | Current | Power` row on the BMS battery page with `Cell1 | Cell2 | Cell3` when `/Voltages/Cell1` is valid. This only affects the **classic GUI** (touchscreen + Remote Console via NeatVNC on port 5901).
+
+**The new GUI v2 (`https://<cerbo>/gui-v2/`) does NOT render per-cell voltages** — the WASM binary has no references to `/Voltages/Cell*`. Only `/System/MinCellVoltage` and `/System/MaxCellVoltage` show up there (under the Details page as "Lowest/Highest cell voltage"). This is a Victron limitation, not something this driver can work around.
+
+The QML mod is installed by `install_cerbo_driver.sh` and survives until the next firmware reflash.
+
+## Initial Install (or after reflash)
+
+On the Cerbo, first enable SSH access:
+- Settings → General → set Root Password (and/or Access level → Superuser)
+- Then enable Modbus TCP (read/write)
+
+Then from the Pi:
+
+```bash
+cd /projects/battery_balancer/cerbo_gx
+./install_cerbo_driver.sh 192.168.15.203 778394
+```
+
+The installer:
+1. Copies `dbus-bms-battery.py` to `/data/dbus-bms-battery/` on the Cerbo
+2. Creates the runit service scripts at `/data/dbus-bms-battery/service/` and symlinks to `/service/dbus-bms-battery`
+3. Backs up the original `PageBattery.qml` and installs the modified version
+4. Starts the service
+
+Verify after install:
+```bash
+sshpass -p 778394 ssh root@192.168.15.203 'svstat /service/dbus-bms-battery'
+# Should show: /service/dbus-bms-battery: up (pid ...)
+sshpass -p 778394 ssh root@192.168.15.203 'dbus -y com.victronenergy.battery.modbus_tcp_bms /Voltages/Cell1 GetValue'
+# Should return a number around 18-21 V
+```
+
+## Toggling the Driver via Web API
+
+The Pi exposes `/api/cerbo_integration` (GET/POST `{enabled: true/false}`) which uses `sshpass` to run `svc -u` / `svc -d /service/dbus-bms-battery` on the Cerbo. State persists in `cerbo_integration_state` in `data_dir`. This relies on the `[CerboGX] password` value in `battery_monitor.ini`.
+
+## Cerbo Settings That Need To Be Right
+
+| Setting | Value | Why |
+|---|---|---|
+| Services → Modbus TCP | Enabled, read/write | For DVCC writes from Pi |
+| System Setup → Battery monitor | **SmartShunt** (NOT "Default" or BMS) | The BMS driver doesn't report current/SoC. The SmartShunt does. Default auto-pick will choose the BMS and you lose current/SoC display |
+| System Setup → DVCC → SVS / DVCC | as desired | DVCC must be on for `Settings/SystemSetup/MaxChargeVoltage` writes to actually limit charging |
 
 ## Cerbo GX Info
 
-- **IP**: 192.168.15.203 (DHCP — may change after reflash)
-- **Password**: 555555
-- **Venus OS**: Large image (required for Node-RED), v6.12.23-venus-8
+- **IP**: 192.168.15.203 (whatever mechanism — Cerbo static config or DHCP reservation — the Pi just reads it from `battery_monitor.ini` `[CerboGX] ip`)
+- **Root password**: 778394 (also in `battery_monitor.ini` `[CerboGX] password`)
+- **Node-RED admin**: admin / 778394 (not currently used — Node-RED can be disabled)
+- **Venus OS**: Large image, v6.12.23-venus-8 or later
+
+## Troubleshooting
+
+**Driver shows no data on D-Bus:**
+- Pi's Modbus server reachable? `nc -zv 192.168.15.202 502` from the Cerbo
+- Pi BMS has done a valid poll? Register 260 (data-valid) must be 1 — check `bms.py` log for "Poll cycle complete"
+- Check driver log: `tail /var/log/dbus-bms-battery/current` on the Cerbo
+
+**Driver constantly logs "Connection refused":**
+- Pi BMS process not running, or Pi IP changed. Check `pgrep -af bms.py` on the Pi
+- If Pi IP changed, update `BMS_HOST` in `dbus-bms-battery.py` and redeploy
+
+**CVL not updating on the Cerbo:**
+- Modbus TCP "read/write" enabled? Settings → Services → Modbus TCP
+- Check Pi log for `Cerbo Modbus exception` lines — register 2710 writes can fail with function-code error if write access is off
+- DVCC enabled on the Cerbo? Without DVCC, the MaxChargeVoltage setting is ignored by the charger
+
+**Two BMS battery devices showing up:**
+- Old Node-RED virtual battery flow may still be deployed. The current flow at `/projects/battery_balancer/cerbo/node-red-bms-flow.json` has the virtual-battery node removed; if you see `com.victronenergy.battery.virtual_vv_bat` on D-Bus, the flow was reverted
+
+**Battery monitor showing wrong SoC / current:**
+- System Setup → Battery monitor must be set to the SmartShunt explicitly, not "Default" (Default auto-picks the BMS, which has no current measurement)
+
+## History
+
+- **March 2026 — initial integration:** Custom `dbus-bms-battery.py` driver on Cerbo. Pi exposed Modbus TCP server, driver bridged to D-Bus
+- **March 28 2026 — switched to "no driver on Cerbo":** Direct Modbus writes from Pi, Carlo Gavazzi EM24 emulation for bank-voltage display, Node-RED virtual battery for the rest
+- **May 14 2026 — reverted to the thin driver:** GUI v2 doesn't render the EM24 grid device meaningfully on the battery page, and the Node-RED virtual battery couldn't be coaxed into showing per-cell voltages. The thin-driver approach gives the cleanest per-bank display on the classic GUI via the QML mod, and works around GUI v2's limitations as best as possible. EM24 emulation and the Node-RED battery node were removed at the same time

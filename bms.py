@@ -17,225 +17,76 @@ def get_ip_for_slave(slave_addr, slave_addresses, slave_ips, default_ip):
     except ValueError:
         return default_ip
 # --------------------------------------------------------------------------------
-# Battery Management System (BMS) Script Documentation
+# Battery Management System (BMS) - bms.py
 # --------------------------------------------------------------------------------
 #
-# **Script Name:** bms.py
-# **Version:** 1.10 (As of September 07, 2025) - Added thread safety with locks for web_data to prevent race conditions. Enhanced error handling in API routes with try/except and JSON error responses.
-# **Author:** [Your Name or Original Developer] - Built for Raspberry Pi-based battery monitoring and balancing.
-# **Purpose:** This script acts as a complete Battery Management System (BMS) for a configurable NsXp battery configuration (N series banks, X parallel cells per bank, where X = sensors_per_bank * number_of_parallel_batteries). It monitors temperatures from multiple Modbus slaves and voltages, balances charge between banks, detects issues, logs events, sends alerts, and provides user interfaces via terminal (TUI) and web dashboard. Includes time-series logging using RRDTool, ASCII line charts in TUI, and interactive charts in web via Chart.js.
+# Runs on a Raspberry Pi at 192.168.15.202 (static). Manages a 3-series x 8-parallel
+# LiFePO4 pack: 3 banks of ~20V, ~60V pack total, 192 NTC temperature sensors total.
 #
-# **Detailed Overview:**
-# - **Temperature Monitoring:** Connects to NTC thermistors via Lantronix EDS4100 using Modbus TCP in multidrop RS485 configuration. Supports multiple slaves (one per parallel battery), each with num_series_banks * sensors_per_bank channels. Aggregates readings into global channels, groups by series bank for analysis. Applies calibration offsets, checks anomalies (high/low, deviations, rises, lags, disconnections). Handles per-slave errors gracefully.
-# - Calibration: On first valid read (all sensors > valid_min across all slaves), computes overall median and offsets. Saves to 'offsets.txt' for future runs.
-# - Anomalies Checked:
-# - Invalid/Disconnected: Reading <= valid_min (e.g., 0.0°C).
-# - High: > high_threshold (e.g., 42.0°C).
-# - Low: < low_threshold (e.g., 0.0°C).
-# - Deviation: Absolute > abs_deviation_threshold (e.g., 2.0°C) or relative > deviation_threshold (e.g., 10%) from bank median.
-# - Abnormal Rise: Increase > rise_threshold (e.g., 2.0°C) since last poll.
-# - Group Lag: Change differs from bank median change by > disconnection_lag_threshold (e.g., 0.5°C).
-# - Sudden Disconnection: Was valid, now invalid.
-# - **Voltage Monitoring & Balancing:** Uses ADS1115 ADC over I2C to measure voltages of num_series_banks banks. Balances if difference > VoltageDifferenceToBalance (e.g., 0.1V) by connecting high to low bank via relays and DC-DC converter (relay logic configurable via INI).
-# - Heating Mode: If any temperature < 10°C, balances regardless of voltage difference to generate heat.
-# - Safety: Skips balancing if alerts active (e.g., anomalies) or if balancer_failed flag is set. Rests for BalanceRestPeriodSeconds (e.g., 60s) after balancing.
-# - Balancing Verification: During startup and regular balancing, monitors voltage trends. If no expected decrease in source or increase in destination (min_delta, e.g., 0.01V), raises alert and sets balancer_failed=True to prevent future balancing until restart or manual reset.
-# - Voltage Checks: Alerts if < LowVoltageThresholdPerBattery (e.g., 18.5V), > HighVoltageThresholdPerBattery (e.g., 21.0V), or zero.
-# - **Alerts & Notifications:** Logs to 'battery_monitor.log'. Activates alarm relay on issues. Sends throttled emails (e.g., every 3600s) via SMTP.
-# - **Watchdog:** If enabled, pets hardware watchdog via dedicated thread (every 5s with aliveness check via timestamp) to prevent resets on hangs. Uses /dev/watchdog with 15s timeout (Pi max).
-# - **User Interfaces:**
-# - **TUI (Terminal UI):** Uses curses for real-time display: ASCII art batteries (dynamic for num_series_banks) with voltages/temps, alerts, balancing progress bar/animation, last 20 events. Now includes ASCII line charts for voltage history per bank and median temperature, placed in the top-right section for visualization of trends over time.
-# - **Web Dashboard:** HTTP server on port 8080 (configurable). Shows voltages, temps, alerts, balancing status. Supports API for status/balance/history. Optional auth/CORS. Now includes interactive time-series charts using Chart.js for voltages per bank and median temperature, placed at the top of the page after the header for easy viewing.
-# - **Time-Series Logging:** Uses RRDTool for persistent storage of bank voltages and overall median temperature. Data is updated every poll interval (e.g., 10s), but RRD is configured with 1min steps for aggregation. History is limited to ~480 entries (e.g., 8 hours). Fetch functions retrieve data for TUI and web rendering.
-# - **Startup Self-Test:** Validates config, hardware connections (I2C/Modbus per slave), initial reads, balancer (tests all pairs for voltage changes).
-# - Retries on failure after 2min. After max retries, proceeds to main loop with startup_failed reset to False to allow balancing, avoiding perpetual blocking. Logs warnings.
-# - **Error Handling:** Retries reads (exponential backoff), handles missing hardware (test mode), logs tracebacks, graceful shutdown on Ctrl+C. Per-slave Modbus errors handled with alerts and fallback values.
-# - **Configuration:** From 'battery_monitor.ini'. Defaults if missing keys. See INI documentation below.
-# - **Logging:** Configurable level (e.g., INFO). Timestamps events.
-# - **Shutdown:** Cleans GPIO, web server, watchdog on exit.
-# **Key Features Explained for Non-Programmers:**
-# - Imagine this script as a vigilant guardian for your battery pack. It constantly checks the "health" (temperature and voltage) of each part of the battery.
-# - Temperatures: Like checking body temperature with 96 thermometers (for 4 batteries). If one is too hot/cold or acting weird, it raises an alarm.
-# - Voltages: Measures "energy level" in each bank. If one has more energy than another, it transfers some to balance them, like pouring water between buckets.
-# - Heating: In cold weather (<10°C), it deliberately transfers energy to create warmth inside the battery cabinet.
-# - Alerts: If something's wrong, it logs it, turns on a buzzer/light (alarm relay), and emails you (but not too often to avoid spam).
-# - Interfaces: Terminal shows a fancy text-based dashboard with ASCII charts for trends and lists all temps; web page lets you view from browser with interactive charts and full temp lists.
-# - Startup Check: Like a self-diagnostic when your car starts – ensures everything's connected and working before running. Proceeds after retries with flags reset for operation.
-# - Time-Series: Tracks history of voltages and temps, shows trends in charts to spot patterns over time.
-# - Balancing Fail-Safe: Verifies energy transfer by checking voltage changes; disables balancing if hardware issue detected (e.g., relays not switching).
-# **How It Works (Step-by-Step for Non-Programmers):**
-# 1. **Start:** Loads settings from INI file (like a recipe book).
-# 2. **Setup:** Connects to hardware (sensors, relays) – if missing, runs in "pretend" mode. Creates/loads RRD database for history.
-# 3. **Self-Test:** Checks if config makes sense, hardware responds (per Modbus slave), sensors give good readings, aggregated. Balancing actually changes voltages (verifies relay switching via voltage deltas). If fail, alerts and retries. After max retries, proceeds with flags reset.
-# 4. **Main Loop (Repeats Forever):**
-# - Read temperatures from all slaves, aggregate.
-# - Calibrate them (adjust based on startup values for accuracy).
-# - Check for temperature problems (too hot, too cold, etc.).
-# - Read voltages from configured banks.
-# - Check for voltage problems (too high, too low, zero).
-# - Update RRD database with voltages and median temp.
-# - If cold (<10°C anywhere), balance to heat up (with verification).
-# - Else, if voltages differ too much, balance normally (with verification).
-# - Skip if alerts active or balancer failed.
-# - Fetch history from RRD for charts.
-# - Update terminal (with ASCII charts and full temp lists)/web displays (with Chart.js and full lists).
-# - Log events, send emails if issues.
-# - Update alive timestamp for watchdog.
-# - Wait a bit (e.g., 10s), repeat.
-# 5. **Balancing Process:** Connects high to low bank with relays, turns on converter to transfer charge, monitors voltages for changes, shows progress, turns off after time. Verifies deltas; alerts/disables if failed.
-# 6. **Shutdown:** If you press Ctrl+C, cleans up connections safely.
-# **Updated Logic Flow Diagram (ASCII - More Detailed):**
+# Major subsystems (all running in the same process):
+#   - Main poll loop: reads voltages (ADS1115 I2C ADC), reads temperatures (Modbus
+#     TCP to 8 RS485 slaves via Lantronix gateways), runs anomaly checks, drives
+#     the balancer, computes DVCC charge limits.
+#   - Curses TUI on tty1 (the physical console / VNC).
+#   - Flask web server on port 8080 (status JSON, history, manual balance trigger,
+#     DVCC settings).
+#   - Modbus TCP server on port 502 exposing pack state to the Cerbo GX driver.
+#     See cerbo_gx/README.md for the integration details and register map.
+#   - Modbus TCP client to the Cerbo GX for two side-channel operations:
+#       * reading the system DC bus voltage (unit 227 reg 26) for charge-state
+#         detection and cable-drop compensation,
+#       * writing DVCC charge voltage/current limits to com.victronenergy.settings
+#         (unit 100 regs 2710, 2705).
+#   - RRD time-series logging (60s step, 24h retention) for charting.
+#   - Hardware watchdog at /dev/watchdog (15s timeout) petted from a dedicated
+#     thread that monitors a main-loop liveness timestamp (60s hang threshold).
+#   - GPIO control for balancer relays (4x), DC-DC converter, alarm relay, fan.
 #
-"""
-+--------------------------------------+
-| Load Config from INI |
-| (Read settings file, incl. parallel) |
-+--------------------------------------+
-|
-v
-+--------------------------------------+
-| Setup Hardware |
-| (I2C bus, GPIO pins, RRD DB) |
-| Compute sensor groupings |
-+--------------------------------------+
-|
-v
-+--------------------------------------+
-| Startup Self-Test |
-| (Config valid? |
-| Hardware connected? Per slave? |
-| Initial reads OK? Aggregated? |
-| Balancer works? Verify deltas) |
-| If fail: Alert, Retry |
-| After max retries: Reset flags, Proceed |
-+--------------------------------------+
-|
-v
-+--------------------------------------+
-| Start Watchdog Thread |
-| (Pet every 5s if main alive) |
-+--------------------------------------+
-|
-v
-+--------------------------------------+ <---------------------+
-| Main Loop (Repeat) | |
-+--------------------------------------+ |
-| |
-v |
-+--------------------------------------+ |
-| Read Temps (Per Slave, Aggregate) | |
-| (Handle errors per slave) | |
-+--------------------------------------+ |
-| |
-v |
-+--------------------------------------+ |
-| Calibrate Temps | |
-| (Apply offsets if set) | |
-+--------------------------------------+ |
-| |
-v |
-+--------------------------------------+ |
-| Check Temp Issues | |
-| (High/Low/Deviation/ | |
-| Rise/Lag/Disconnect, with bat info) | |
-+--------------------------------------+ |
-| |
-v |
-+--------------------------------------+ |
-| Read Voltages (ADC) | |
-| (3 banks via I2C) | |
-+--------------------------------------+ |
-| |
-v |
-+--------------------------------------+ |
-| Check Voltage Issues | |
-| (High/Low/Zero) | |
-+--------------------------------------+ |
-| |
-v |
-+--------------------------------------+ |
-| Update RRD with Data | |
-| (Voltages, Median Temp) | |
-+--------------------------------------+ |
-| |
-v |
-+--------------------------------------+ |
-| If Any Temp < 10°C: | |
-| Balance for Heating (Verify Deltas) | |
-| Else If Volt Diff > Th: | |
-| Balance Normally (Verify Deltas) | |
-| (High to Low Bank) | |
-| Skip if Alerts/Balancer Failed | |
-+--------------------------------------+ |
-| |
-v |
-+--------------------------------------+ |
-| Fetch RRD History | |
-| (For Charts) | |
-+--------------------------------------+ |
-| |
-v |
-+--------------------------------------+ |
-| Update TUI (Terminal) | |
-| & Web Dashboard | |
-| (Show status, alerts, | |
-| ASCII/Chart.js Charts, full temps) | |
-+--------------------------------------+ |
-| |
-v |
-+--------------------------------------+ |
-| Log Events, Send Email | |
-| if Issues & Throttled | |
-+--------------------------------------+ |
-| |
-v |
-+--------------------------------------+
-| Update Alive Timestamp |
-+--------------------------------------+
-| |
-v |
-+--------------------------------------+
-| Sleep (Poll Interval) |
-+--------------------------------------+
-| |
-+-------------------------------------------------------------+
-"""
-# **Dependencies (What the Script Needs to Run):**
-# - **Python Version:** 3.11 or higher (core language for running the code).
-# - **Hardware Libraries:** smbus (for I2C communication with sensors/relays), RPi.GPIO (for controlling Raspberry Pi pins). Install: sudo apt install python3-smbus python3-rpi.gpio.
-# - **External Library:** art (for ASCII art in TUI). Install: pip install art.
-# - **Time-Series Storage:** rrdtool (for RRD database). Install: sudo apt install rrdtool.
-# - **Standard Python Libraries:** socket (networking), statistics (math like medians), time (timing/delays), configparser (read INI), logging (save logs), signal (handle shutdown), gc (memory cleanup), os (files), sys (exit), argparse (command-line), threading (web server and watchdog), json/http.server/urllib/base64 (web), traceback (errors), fcntl/struct (watchdog), subprocess (for rrdtool commands), xml.etree.ElementTree (for parsing RRD XML output).
-# - **Hardware Requirements:** Raspberry Pi (any model, detects for watchdog), ADS1115 ADC (voltage), TCA9548A multiplexer (I2C channels), Relays (balancing), Lantronix EDS4100 (Modbus for temps), GPIO pins (e.g., 5 for DC-DC, 6 for alarm, 4 for fan).
-# - **No Internet for Installs:** All libraries must be pre-installed; script can't download. For web charts, Chart.js is loaded via CDN (requires internet for dashboard users).
-# **Installation Guide (Step-by-Step for Non-Programmers):**
-# 1. **Install Python:** On Raspberry Pi, run in terminal: sudo apt update; sudo apt install python3.
-# 2. **Install Hardware Libraries:** sudo apt install python3-smbus python3-rpi.gpio.
-# 3. **Install Art Library:** pip install art (or sudo pip install art if needed).
-# 4. **Install RRDTool for Time-Series:** sudo apt install rrdtool.
-# 5. **Enable I2C:** Run sudo raspi-config, go to Interface Options > I2C > Enable, then reboot.
-# 6. **Create/Edit INI File:** Make 'battery_monitor.ini' in same folder as script. Copy template below and fill in values (e.g., emails, IPs, slave addresses).
-# 7. **Run Script:** sudo python bms.py (needs root for hardware access).
-# **Validate Config:** python bms.py --validate-config [--data-dir /path/to/config]
-# 8. **View Web Dashboard:** Open browser to http://<your-pi-ip>:8080. Charts will load via Chart.js CDN.
-# 9. **Logs:** Check 'battery_monitor.log' for details. Set LoggingLevel=DEBUG in INI for more info.
-# 10. **RRD Database:** Created automatically as 'bms.rrd' on first run. No manual setup needed.
-# **Notes & Troubleshooting:**
-# - **Hardware Matching:** Ensure INI addresses/pins match your setup. Wrong IP/port/slave = no temps.
-# - **Email Setup:** Use Gmail app password (not regular password) for SMTP_Password.
-# - **TUI Size:** Terminal should be wide (>80 columns) and tall for full display, including all temps and charts.
-# - **Test Mode:** If no hardware, script runs without crashing but warns.
-# - **Security:** For web, enable auth_required=True and set strong username/password.
-# - **Offsets File:** 'offsets.txt' stores calibration – delete to recalibrate.
-# - **RRD Issues:** If rrdtool commands fail, check installation and permissions. Database 'bms.rrd' stores aggregated data; use rrdtool info bms.rrd for details.
-# - **Common Errors:** I2C errors = check wiring/connections. Modbus errors = check Lantronix IP/port/slave addresses/RS485 wiring. RRD errors = ensure rrdtool installed and path correct.
-# - **Performance:** Poll interval ~10s; balancing ~5s. Adjust in INI. Charts fetch from RRD (~480 entries) won't impact performance.
-# - **Customization:** Edit thresholds in INI for your battery specs (e.g., Li-ion safe ranges). For longer history, adjust RRA in RRD creation.
-# - **Watchdog Note:** Dedicated thread ensures reliable petting; resets only on true main hangs.
-# - **Balancing Failures:** If voltage doesn't change during balancing, script detects it (no silent fail), alerts, and disables future balancing to prevent hardware damage.
-# --------------------------------------------------------------------------------
-# Code Begins Below - With Line-by-Line Comments for Non-Programmers
-# --------------------------------------------------------------------------------
+# Anomaly detection (per-sensor temperature):
+#   - Absolute: too hot (high_threshold, e.g. 42C) or too cold (low_threshold, 2C).
+#   - Deviation: this sensor disagrees with its bank's median by more than
+#     abs_deviation_threshold (8C) AND/OR by more than deviation_threshold (0.55
+#     = 55%). Both checks active by OR logic.
+#   - Rate of rise: a sensor climbing faster than rise_threshold (2C/poll).
+#   - Group-tracking lag: this sensor isn't tracking the bank median's drift.
+#   - Sudden disconnection: was valid, now invalid.
+#
+# Balancing:
+#   - Triggers when max-min bank voltage > VoltageDifferenceToBalance (0.1V) and
+#     source bank is >= min_balance_source_voltage (17V, below this the DC-DC
+#     converter can't operate). Heating mode (any sensor < heating_threshold,
+#     10C) runs balancing regardless of voltage diff to generate heat.
+#   - Verification uses gap-narrowing (initial_diff - final_diff) rather than
+#     absolute voltage deltas, so external charging/loads don't trigger false
+#     failures. Charge-state aware (Bulk/Absorption/Discharging relax the
+#     threshold). Auto-recovery after 5/30 min cooldown for first/repeated
+#     failures; hard-stops after 5 consecutive failures.
+#
+# DVCC pipeline (computed each poll, published to Cerbo every >=30s):
+#   - Hot derate: linear scale from 1.0 -> 0.0 over temp_derate_start (38C) to
+#     temp_derate_end (45C); 0A above end.
+#   - Cold derate: linear scale from 0.0 -> 1.0 over cold_charge_min (0C) to
+#     cold_charge_cutoff (5C); 0A at/below min.
+#   - HV clamp: if any bank >= HighVoltageThresholdPerBattery (21.5V), force CVL
+#     down to base target (no cable-drop added) until pack relaxes.
+#   - Cable-drop comp: learned from the difference between Cerbo DC bus voltage
+#     and BMS pack voltage during charging direction only, EMA-filtered, capped
+#     at 1.0V, rate-limited to 0.02V/cycle increase, starts at 0 each session.
+#
+# Configuration: battery_monitor.ini. SIGHUP hot-reloads the DVCC subset only.
+# Web POST to /api/charge_voltage and /api/dvcc_settings persists changes to the
+# INI in addition to updating the in-memory settings dict.
+#
+# State files in data_dir:
+#   - offsets.txt: temperature calibration baseline (written once on first valid
+#     read, not auto-rewritten).
+#   - bms.rrd: round-robin database for voltage/temp history.
+#   - battery_monitor.log: rotating log, 10MB x 10 files.
+#   - cerbo_integration_state: one token "enabled"/"disabled".
+#
+# See cerbo_gx/README.md for the Cerbo-side thin driver, GUI mod, and the full
+# Modbus register map served by this script on port 502.
+
 # Import statements: These bring in tools and libraries that the script needs to work.
 # Think of them as gathering the ingredients and tools before cooking.
 import socket # Network communication tool - like a phone to call the temperature sensor device over the internet.
@@ -1080,7 +931,7 @@ def load_config(data_dir):
         'valid_min': config_parser.getfloat('Temp', 'valid_min', fallback=0.0),  # Minimum valid reading (below = disconnected).
         'heating_threshold': config_parser.getfloat('Temp', 'heating_threshold', fallback=10.0),  # Temp below which balancer runs to generate heat.
         'max_retries': config_parser.getint('Temp', 'max_retries', fallback=3),  # Read retries.
-        'retry_backoff_base': config_parser.getint('Temp', 'retry_backoff_base', fallback=1),  # Backoff multiplier.
+        'retry_backoff_base': config_parser.getint('Temp', 'retry_backoff_base', fallback=1),  # Loaded for API compat; read_ntc_sensors() ignores it (sleep delays are hard-coded).
         'query_delay': config_parser.getfloat('Temp', 'query_delay', fallback=0.25),  # Modbus response wait.
         'abs_deviation_threshold': config_parser.getfloat('Temp', 'abs_deviation_threshold', fallback=2.0),  # Absolute deviation °C.
         'cabinet_over_temp_threshold': config_parser.getfloat('Temp', 'cabinet_over_temp_threshold', fallback=35.0),  # Fan trigger temp.
@@ -1128,7 +979,7 @@ def load_config(data_dir):
     voltage_settings = {
         'VoltageDifferenceToBalance': config_parser.getfloat('General', 'VoltageDifferenceToBalance', fallback=0.1),  # Min diff to trigger balance V.
         'BalanceDurationSeconds': config_parser.getint('General', 'BalanceDurationSeconds', fallback=5),  # How long to balance s.
-        'SleepTimeBetweenChecks': config_parser.getfloat('General', 'SleepTimeBetweenChecks', fallback=0.1),  # Delay between voltage reads.
+        'SleepTimeBetweenChecks': config_parser.getfloat('General', 'SleepTimeBetweenChecks', fallback=0.1),  # Loaded but unreferenced anywhere in code (vestigial). Main loop pacing comes from poll_interval.
         'BalanceRestPeriodSeconds': config_parser.getint('General', 'BalanceRestPeriodSeconds', fallback=60),  # Cooldown after balance s.
         'LowVoltageThresholdPerBattery': config_parser.getfloat('General', 'LowVoltageThresholdPerBattery', fallback=18.5),  # Low V alert per bank.
         'HighVoltageThresholdPerBattery': config_parser.getfloat('General', 'HighVoltageThresholdPerBattery', fallback=21.0),  # High V alert per bank.
@@ -1199,7 +1050,7 @@ def load_config(data_dir):
     modbus_server_settings = {
         'enabled': config_parser.getboolean('ModbusServer', 'enabled', fallback=True),  # Enable Modbus TCP server.
         'port': config_parser.getint('ModbusServer', 'port', fallback=5020),  # Port for Modbus TCP (5020 to avoid root requirement).
-        'unit_id': config_parser.getint('ModbusServer', 'unit_id', fallback=1),  # Modbus unit/slave ID.
+        'unit_id': config_parser.getint('ModbusServer', 'unit_id', fallback=1),  # Loaded but unused; server runs single=True so any unit ID matches.
         'update_interval': config_parser.getfloat('ModbusServer', 'update_interval', fallback=1.0)  # Register update interval.
     }
     # DVCC (Distributed Voltage and Current Control) limits for Victron Cerbo GX.
@@ -3692,34 +3543,57 @@ def startup_self_test(settings, stdscr, data_dir):
 
 def create_modbus_datastore(num_banks):
     """
-    Create Modbus datastore with holding registers for battery data.
-    
-    Register Map (Victron Cerbo GX compatible):
-    Holding Registers (40001+):
-    - 40001-40003: Bank voltages in centivolts (V * 100)
-    - 40004: Total voltage in centivolts
-    - 40005: Average temperature in tenths of degrees (C * 10)
-    - 40006: Max temperature in tenths of degrees
-    - 40007: Min temperature in tenths of degrees
-    - 40008: System status flags (bitfield)
-    - 40009: Alert count
-    - 40010: Balancing status (0=off, 1=active)
-    - 40011-40013: Bank median temperatures in tenths of degrees
-    - 40014-40016: Bank min temperatures
-    - 40017-40019: Bank max temperatures
-    - 40020-40022: Bank invalid sensor counts
-    - 40023: Number of series banks
-    - 40024: Number of parallel batteries
-    - 40025: Total sensor count
-    - 40026: Valid sensor count
-    - 40027-40029: Bank voltage low threshold (centivolts)
-    - 40030-40032: Bank voltage high threshold (centivolts)
-    
-    Args:
-        num_banks (int): Number of battery banks.
-    
-    Returns:
-        ModbusDeviceContext: The datastore for the Modbus server.
+    Create Modbus TCP holding-register datastore for the Cerbo GX thin driver
+    to poll. Single slave context (single=True) so any unit ID matches.
+
+    Register Map (native addresses, no 40001+ offset; values written by
+    update_modbus_registers each cycle except where noted):
+
+    BMV-700-style battery service
+    - 259       Total pack voltage         cV (V*100)
+    - 260       Data-valid flag            0/1  -- 1 only after first valid poll;
+                                                  driver waits for 1 before publishing
+    - 261       Current                    dA   (hardcoded 0; BMS doesn't measure)
+    - 262       Average pack temperature   dC (C*10)
+    - 266       SOC                        0.1% -- linear interp from 18*N to 21.5V/cell
+    - 268       LowVoltage alarm           0 or 2
+    - 269       HighVoltage alarm          0 or 2
+    - 273       LowTemperature alarm       0 or 2
+    - 274       HighTemperature alarm      0 or 2
+
+    DVCC limits
+    - 305       MaxChargeVoltage (CVL)     dV (V*10), <=63V, after HV clamp + cable-drop
+    - 306       BatteryLowVoltage          dV, dvcc_min_discharge_voltage - discharge_cable_drop
+    - 307       MaxChargeCurrent           dA (A*10), after temp/cold derating
+    - 308       MaxDischargeCurrent        dA
+    - 330       AllowToCharge              0/1 (0 only on HV-string alarm; initial 1)
+    - 331       AllowToDischarge           0/1 (0 only on LV-string alarm; initial 1)
+
+    System / topology
+    - 318       Min cell (bank) temperature   dC
+    - 319       Max cell (bank) temperature   dC
+    - 320-322   Per-bank median temperature   dC
+    - 323-325   Per-bank min temperature      dC
+    - 326-328   Per-bank max temperature      dC
+    - 1282      State (9=Running, 10=Error, 14=Standby)
+    - 1286      NrOfBatteries (= num_series_banks)
+    - 1287      BatteriesParallel
+    - 1288      BatteriesSeries
+    - 1289      NrOfCellsPerBattery (= num_series_banks)
+    - 1290      Min bank voltage  cV
+    - 1291      Max bank voltage  cV
+    - 1306+     Per-bank voltages cV (up to 16 banks)
+
+    Pylontech compat (some legacy fields the Cerbo driver historically read)
+    - 768-771   Duplicated total voltage cV
+    - 5000, 5672  Duplicated total voltage cV
+    - 35168     Number of modules
+    - 35169     Module voltage cV
+    - 35170-35172  Module-online flags (hardcoded 1)
+
+    Datastore is allocated as a flat block of 41218 registers ([0]*41218) to
+    cover reg 35168+ addressing. Registers 330 and 331 are seeded to [1, 1]
+    at init so the Cerbo never reads 0 (no-charge/no-discharge) on boot.
     """
     if not MODBUS_SERVER_AVAILABLE:
         return None

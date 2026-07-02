@@ -1598,17 +1598,21 @@ def check_deviation(calibrated, bank_median, ch, alerts, abs_deviation_threshold
         return
     # Calculate absolute deviation.
     abs_dev = abs(calibrated - bank_median)
-    # Relative: abs_dev / |median|, avoid divide by zero.
-    rel_dev = abs_dev / abs(bank_median) if bank_median != 0 else 0
+    # Relative: abs_dev / safe_operating_range (high - low threshold).
+    # Using the safe range as denominator rather than the bank median (which is
+    # an arbitrary Celsius value) gives a physically meaningful percentage that
+    # doesn't tighten artificially at cold temperatures. 8°C in a 40°C range = 20%.
+    safe_range = settings['high_threshold'] - settings['low_threshold']
+    rel_dev = abs_dev / safe_range if safe_range > 0 else 0
     # Check either threshold exceeded.
     if abs_dev > abs_deviation_threshold or rel_dev > deviation_threshold:
         bank = get_bank_for_channel(ch)
         bat_id, local_ch = get_battery_and_local_ch(ch, settings["num_series_banks"], settings["sensors_per_bank"])
-        alert = f"Battery {bat_id} Bank {bank} Local Ch {local_ch}: Deviation from bank median (abs {abs_dev:.1f}°C or {rel_dev:.2%})."
+        alert = f"Battery {bat_id} Bank {bank} Local Ch {local_ch}: Deviation from bank median (abs {abs_dev:.1f}°C, {rel_dev:.1%} of {safe_range}°C safe range)."
         alerts.append(alert)
         event_log.append(f"{time.strftime('%Y-%m-%d %H:%M:%S')}: {alert}")
 
-        logging.warning(f"Deviation alert on Battery {bat_id} Bank {bank} Local Ch {local_ch}: abs {abs_dev:.1f}, rel {rel_dev:.2%}.")
+        logging.warning(f"Deviation alert on Battery {bat_id} Bank {bank} Local Ch {local_ch}: abs {abs_dev:.1f}°C, rel {rel_dev:.1%} of {safe_range}°C range.")
 
 def check_abnormal_rise(current, previous_temps, ch, alerts, poll_interval, rise_threshold, settings):
     """

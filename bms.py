@@ -2276,20 +2276,42 @@ def balance_battery_voltages(stdscr, high, low, settings, temps_alerts, is_heati
         # Check charge state for context-aware thresholds
         charge_state = settings.get('_charge_state', 'Idle')
         high_current = charge_state in ('Bulk', 'Absorption', 'Discharging')
+        # The gap-narrowing test is only a valid pass/fail criterion when there is
+        # actually a gap to close AND closing it was the point of the run. Two cases
+        # where it is not, and where demanding min_delta of narrowing produces a
+        # guaranteed false failure:
+        #   - Heating mode: we balance regardless of differential to make the DC-DC
+        #     converter generate heat. Narrowing the gap is not the goal.
+        #   - Gap already below threshold: you cannot narrow a 0.047V gap by 0.05V.
+        #     Even perfect balancing to 0.000V fails the test.
+        # Both fall back to the same relaxed criterion used during high current: accept
+        # any narrowing, and only call it a hardware fault if the gap widens dramatically.
+        gap_below_threshold = initial_diff < min_delta
+        if high_current:
+            relax_reason = f"high-current, {charge_state}"
+        elif is_heating:
+            relax_reason = "heating mode - balancing for heat, not gap reduction"
+        elif gap_below_threshold:
+            relax_reason = f"initial gap {initial_diff:.3f}V already below {min_delta}V threshold"
+        else:
+            relax_reason = None
 
         logging.info(f"Balance verification: initial diff={initial_diff:.3f}V, "
                     f"avg diff={avg_diff:.3f}V, discrete diff={discrete_diff:.3f}V | "
                     f"reduction: avg={diff_reduction:+.3f}V, discrete={discrete_diff_reduction:+.3f}V | "
                     f"absolute: High {high_change:+.3f}V, Low {low_change:+.3f}V | "
-                    f"threshold={min_delta}V, charge_state={charge_state}")
+                    f"threshold={min_delta}V, charge_state={charge_state}, "
+                    f"relaxed={relax_reason or 'no'}")
 
-        if high_current:
-            # During high current flow, voltage readings are dominated by IR drops and
-            # unequal charging rates across banks at different SOCs. The balancer's small
-            # differential signal is unreliable to measure.
+        if relax_reason is not None:
+            # Strict gap-narrowing does not apply here. During high current flow, voltage
+            # readings are dominated by IR drops and unequal charging rates across banks at
+            # different SOCs, so the balancer's small differential signal is unreliable to
+            # measure. In heating mode, or when the banks are already balanced tighter than
+            # min_delta, there is simply no gap reduction to demand.
             if diff_reduction > 0 or discrete_diff_reduction > 0:
                 # Gap narrowed at all - balancer is working
-                logging.info(f"Balancing verified (high-current, {charge_state}): gap narrowed "
+                logging.info(f"Balancing verified ({relax_reason}): gap narrowed "
                             f"{diff_reduction:+.3f}V (discrete {discrete_diff_reduction:+.3f}V).")
                 if balancer_fail_count > 0:
                     logging.info(f"Balancer recovery: successful after {balancer_fail_count} consecutive failure(s).")
@@ -2297,7 +2319,7 @@ def balance_battery_voltages(stdscr, high, low, settings, temps_alerts, is_heati
             elif diff_reduction < -0.15:
                 # Gap widened by >0.15V - genuine hardware fault even during charging
                 alert = (f"Balancing failed from Bank {high} to {low}: "
-                        f"Gap widened significantly during {charge_state} "
+                        f"Gap widened significantly ({relax_reason}) "
                         f"(initial gap: {initial_diff:.3f}V, avg gap: {avg_diff:.3f}V, "
                         f"reduction: {diff_reduction:+.3f}V | "
                         f"Absolute: High {high_change:+.3f}V, Low {low_change:+.3f}V). "
@@ -2310,8 +2332,8 @@ def balance_battery_voltages(stdscr, high, low, settings, temps_alerts, is_heati
                 balancer_fail_reason = alert
             else:
                 # Gap didn't narrow but didn't widen dramatically - inconclusive
-                logging.info(f"Balancing inconclusive during {charge_state} from Bank {high} to {low}: "
-                            f"diff_reduction={diff_reduction:+.3f}V (threshold relaxed during high current). "
+                logging.info(f"Balancing inconclusive from Bank {high} to {low}: "
+                            f"diff_reduction={diff_reduction:+.3f}V (threshold relaxed - {relax_reason}). "
                             f"Will NOT set balancer_failed.")
         elif diff_reduction >= min_delta:
             # Gap narrowed by at least min_delta - balancing worked
